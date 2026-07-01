@@ -6,3 +6,5 @@ build/
 *.spec
 .pytest_cache/
 *.pptx
+model/*.gguf
+model/.cache/

@@ -21,9 +21,11 @@ class _MockModel:
     def __init__(self, response: str = "短い見出し") -> None:
         self.response = response
         self.call_count = 0
+        self.last_messages: list[dict[str, str]] = []
 
     def create_chat_completion(self, **kwargs) -> dict:
         self.call_count += 1
+        self.last_messages = kwargs.get("messages", [])
         return {"choices": [{"message": {"content": self.response}}]}
 
 
@@ -66,6 +68,49 @@ def test_invalid_llm_output_falls_back() -> None:
     original = "これは三十文字を超える非常に長いタイトル見出しの例です"
     result = llm_mode.shorten_title(model, original)
     assert result == original
+
+
+def test_build_slide_context_from_content_points() -> None:
+    """content の points 冒頭を文脈として抽出する。"""
+    slide = {
+        "type": "content",
+        "title": "長いタイトル",
+        "points": ["消費は底堅い", "設備投資は増加", "第三の要点"],
+    }
+    context = llm_mode._build_slide_context(slide)
+    assert "消費は底堅い" in context
+    assert "設備投資は増加" in context
+    assert "第三の要点" not in context
+
+
+def test_build_slide_context_from_table_headers_and_row() -> None:
+    """table は headers と先頭行を文脈として使う。"""
+    slide = {
+        "type": "table",
+        "title": "長いタイトル",
+        "headers": ["項目", "値"],
+        "rows": [["売上", "100"], ["利益", "20"]],
+    }
+    context = llm_mode._build_slide_context(slide)
+    assert "項目 / 値" in context
+    assert "売上 / 100" in context
+    assert "利益" not in context
+
+
+def test_shorten_title_includes_context_in_prompt() -> None:
+    """points 文脈があるときは主題見出しプロンプトを使う。"""
+    model = _MockModel("消費動向")
+    original = "国内経済の概況について詳細に説明するための非常に長い見出しタイトル例です"
+    llm_mode.shorten_title(
+        model,
+        original,
+        slide_context="消費は底堅く、設備投資は増加傾向",
+    )
+    user_prompt = model.last_messages[1]["content"]
+    system_prompt = model.last_messages[0]["content"]
+    assert "本文の要点" in user_prompt
+    assert "消費は底堅く" in user_prompt
+    assert "このスライド全体の主題" in system_prompt
 
 
 def test_sanitize_strips_html_and_symbols() -> None:

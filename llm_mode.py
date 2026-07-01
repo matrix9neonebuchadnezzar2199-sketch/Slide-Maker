@@ -29,6 +29,14 @@ _model_load_attempted = False
 
 _SYSTEM_PROMPT = (
     "あなたは日本語の見出しを短くする編集者です。"
+    "タイトルと本文の要点から、このスライド全体の主題を表す、"
+    "15文字以内の簡潔な見出しだけを出力してください。"
+    "説明・記号・カギ括弧・句点は付けないでください。"
+    "見出し以外は一切出力しないでください。"
+)
+
+_SYSTEM_PROMPT_TITLE_ONLY = (
+    "あなたは日本語の見出しを短くする編集者です。"
     "入力された文の内容を表す、15文字以内の簡潔な見出しだけを出力してください。"
     "説明・記号・カギ括弧・句点は付けないでください。"
     "見出し以外は一切出力しないでください。"
@@ -147,18 +155,58 @@ def _is_valid_shortened_title(original: str, candidate: str) -> bool:
     return True
 
 
-def _call_llm(model: Any, original_title: str) -> str:
-    """モデルに1件のタイトル短縮を依頼する。"""
+def _build_slide_context(slide: dict[str, Any]) -> str:
+    """スライド本文の冒頭を LLM 用の短い文脈文字列にまとめる。"""
+    slide_type = slide.get("type", "")
+    parts: list[str] = []
+
+    if slide_type == "content":
+        for point in slide.get("points", [])[: schema.LLM_TITLE_CONTEXT_POINTS]:
+            text = str(point).strip()
+            if text:
+                parts.append(_HTML_TAG_RE.sub("", text))
+    elif slide_type == "table":
+        headers = slide.get("headers", [])
+        if headers:
+            parts.append(" / ".join(str(header).strip() for header in headers if str(header).strip()))
+        rows = slide.get("rows", [])
+        if rows:
+            parts.append(" / ".join(str(cell).strip() for cell in rows[0] if str(cell).strip()))
+
+    context = "\n".join(parts)
+    if len(context) > schema.LLM_TITLE_CONTEXT_MAX_CHARS:
+        context = context[: schema.LLM_TITLE_CONTEXT_MAX_CHARS].rstrip() + "…"
+    return context
+
+
+def _build_user_prompt(original_title: str, slide_context: str = "") -> tuple[str, str]:
+    """文脈の有無に応じた user プロンプトと system プロンプトを返す。"""
+    if slide_context.strip():
+        user_prompt = (
+            "次のスライド内容にふさわしい、15文字以内の見出しを作ってください。\n"
+            f"タイトル: {original_title}\n"
+            "本文の要点:\n"
+            f"{slide_context}\n"
+            "見出し:"
+        )
+        return _SYSTEM_PROMPT, user_prompt
+
     user_prompt = (
         "次の文を15文字以内の見出しにしてください。\n"
         f"文: {original_title}\n"
         "見出し:"
     )
+    return _SYSTEM_PROMPT_TITLE_ONLY, user_prompt
+
+
+def _call_llm(model: Any, original_title: str, *, slide_context: str = "") -> str:
+    """モデルに1件のタイトル短縮を依頼する。"""
+    system_prompt, user_prompt = _build_user_prompt(original_title, slide_context)
 
     def _generate() -> str:
         response = model.create_chat_completion(
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=schema.LLM_MAX_TOKENS,
@@ -179,7 +227,12 @@ def _call_llm(model: Any, original_title: str) -> str:
             raise
 
 
-def shorten_title(model: Any | None, original_title: str) -> str:
+def shorten_title(
+    model: Any | None,
+    original_title: str,
+    *,
+    slide_context: str = "",
+) -> str:
     """1件のタイトルを短縮する。失敗時は元タイトルを返す。"""
     if not original_title:
         return original_title
@@ -189,7 +242,7 @@ def shorten_title(model: Any | None, original_title: str) -> str:
         return original_title
 
     try:
-        raw = _call_llm(model, original_title)
+        raw = _call_llm(model, original_title, slide_context=slide_context)
     except Exception as exc:
         logger.warning("LLM shorten failed: %s", exc)
         return original_title
@@ -238,8 +291,9 @@ def apply_title_fix(
     for step, index in enumerate(targets, start=1):
         slide = result[index]
         original = str(slide.get("title", ""))
+        slide_context = _build_slide_context(slide)
         try:
-            slide["title"] = shorten_title(model, original)
+            slide["title"] = shorten_title(model, original, slide_context=slide_context)
         except Exception as exc:
             logger.warning("apply_title_fix slide=%d failed: %s", index, exc)
             slide["title"] = original

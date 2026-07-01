@@ -30,6 +30,12 @@ python -m venv .venv
 .\.venv\Scripts\pip install -r requirements-llm.txt
 ```
 
+Windows / Python 3.14 などでソースビルドが失敗する場合は CPU 用 wheel を使います:
+
+```powershell
+.\.venv\Scripts\pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+```
+
 モデル配置（いずれか）:
 
 | 方法 | パス |
