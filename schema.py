@@ -2,58 +2,164 @@
 
 from __future__ import annotations
 
+from pptx.dml.color import RGBColor
+from pptx.oxml.ns import qn
 from pptx.util import Emu, Pt
 
-# --- スライド寸法 (16:9 固定) ---
-SLIDE_WIDTH = Emu(12192000)
-SLIDE_HEIGHT = Emu(6858000)
+# ============================================================
+# カラーパレット（RGBCold）— 濃紺プライマリのビジネス配色
+# ============================================================
 
-# --- レイアウト (EMU) ---
-MARGIN_LEFT = Emu(457200)      # ~0.5 inch
-MARGIN_RIGHT = Emu(457200)
-MARGIN_TOP = Emu(365760)        # ~0.4 inch
-CONTENT_TOP = Emu(1371600)      # タイトル下の本文開始
-TITLE_TOP = Emu(548640)
-SUBHEAD_TOP = Emu(1005840)
-FOOTER_TOP = Emu(6400800)
+# --- 基本カラー ---
+PRIMARY = RGBColor(0x1F, 0x3A, 0x5F)       # 濃紺（タイトル帯・章番号・[[強調]]）
+PRIMARY_LT = RGBColor(0x2E, 0x5A, 0x88)    # 明るい紺（サブ要素・グラデ上段）
+ACCENT = RGBColor(0x2E, 0x9E, 0xC9)        # シアン系アクセント（差し色・バー）
+ACCENT_WARM = RGBColor(0xE8, 0x8A, 0x3C)   # オレンジ（警告・注意）
 
-# --- フォントサイズ (Pt) ---
-FONT_TITLE = Pt(32)
-FONT_SECTION = Pt(36)
-FONT_SUBHEAD = Pt(18)
-FONT_BODY = Pt(20)
-FONT_AGENDA_ITEM = Pt(22)
-FONT_KPI_VALUE = Pt(28)
-FONT_SMALL = Pt(14)
-FONT_SECTION_NO = Pt(120)
+# --- テキスト ---
+TEXT_MAIN = RGBColor(0x1A, 0x1A, 0x1A)     # 本文（ほぼ黒）
+TEXT_SUB = RGBColor(0x5A, 0x5A, 0x5A)      # 補足・subhead
+TEXT_ON_FILL = RGBColor(0xFF, 0xFF, 0xFF)  # 塗り背景上の白文字
 
-# --- 日本語フォント優先順 ---
-FONT_FAMILIES = ("Meiryo", "Yu Gothic UI", "MS Gothic", "Arial")
+# --- 背景・面 ---
+BG_WHITE = RGBColor(0xFF, 0xFF, 0xFF)      # スライド地
+BG_LIGHT = RGBColor(0xF4, 0xF6, 0xF9)      # カード・帯の薄い面
+BORDER = RGBColor(0xD8, 0xDE, 0xE6)        # 罫線・カード枠
 
-# --- 配色 (ビジネス向け落ち着いた青系) ---
-COLOR_PRIMARY = "#1B3A6B"       # 濃紺
-COLOR_ACCENT = "#2E6DB4"        # アクセント青
-COLOR_BG = "#FFFFFF"
-COLOR_TEXT = "#1A1A1A"
-COLOR_TEXT_LIGHT = "#FFFFFF"
-COLOR_GRAY = "#6B7280"
-COLOR_GRAY_LIGHT = "#E5E7EB"
-COLOR_GOOD = "#059669"
-COLOR_BAD = "#DC2626"
-COLOR_NEUTRAL = "#6B7280"
-COLOR_SECTION_BG = "#1B3A6B"
-COLOR_SECTION_NO = "#FFFFFF33"  # 半透明章番号用（描画時に alpha 相当で薄く）
+# --- 章扉背景の大番号（単色代用・alpha 不要）---
+SECTION_NO_FILL = RGBColor(0xE8, 0xEC, 0xF1)
 
-# --- 第1弾で有効な type ---
+# --- ステータス色（kpi の status 用）---
+STATUS_GOOD = RGBColor(0x2E, 0xA5, 0x6A)
+STATUS_BAD = RGBColor(0xD1, 0x4B, 0x4B)
+STATUS_NEUTRAL = RGBColor(0x7A, 0x7A, 0x7A)
+
+STATUS_COLORS: dict[str, RGBColor] = {
+    "good": STATUS_GOOD,
+    "bad": STATUS_BAD,
+    "neutral": STATUS_NEUTRAL,
+}
+
+# --- ピラミッド等のグラデ段階（上=濃 → 下=淡）---
+GRADIENT_STEPS: list[RGBColor] = [
+    RGBColor(0x1F, 0x3A, 0x5F),
+    RGBColor(0x2E, 0x5A, 0x88),
+    RGBColor(0x4A, 0x7F, 0xB0),
+    RGBColor(0x7A, 0xA8, 0xCE),
+]
+
+# ============================================================
+# フォント
+# ============================================================
+FONT_JP = "Meiryo"
+FONT_JP_ALT = "Yu Gothic UI"
+FONT_FALLBACK = "MS PGothic"
+FONT_FAMILIES = (FONT_JP, FONT_JP_ALT, FONT_FALLBACK)
+
+# フォントサイズ（pt）— 16:9 ワイド基準
+SIZE_TITLE_COVER = Pt(40)
+SIZE_TITLE_SECTION = Pt(32)
+SIZE_SECTION_NO = Pt(200)
+SIZE_TITLE = Pt(28)
+SIZE_SUBHEAD = Pt(15)
+SIZE_BODY = Pt(18)
+SIZE_BODY_SM = Pt(14)
+SIZE_KPI_VALUE = Pt(36)
+SIZE_KPI_LABEL = Pt(13)
+SIZE_CAPTION = Pt(11)
+
+# ============================================================
+# レイアウト寸法（EMU）— 16:9 = 12192000 × 6858000
+# ============================================================
+SLIDE_W = Emu(12192000)
+SLIDE_H = Emu(6858000)
+
+# 後方互換エイリアス（既存コード・SPEC 参照用）
+SLIDE_WIDTH = SLIDE_W
+SLIDE_HEIGHT = SLIDE_H
+
+MARGIN_X = Emu(685800)    # 左右マージン 約 0.75 inch
+MARGIN_TOP = Emu(457200)  # 上マージン 約 0.5 inch
+MARGIN_LEFT = MARGIN_X
+MARGIN_RIGHT = MARGIN_X
+
+TITLE_Y = Emu(457200)
+TITLE_H = Emu(914400)
+SUBHEAD_Y = Emu(1371600)
+BODY_Y = Emu(1828800)
+BODY_H = Emu(4343400)
+CONTENT_W = Emu(10820400)   # SLIDE_W - MARGIN_X * 2
+
+# 後方互換エイリアス
+TITLE_TOP = TITLE_Y
+SUBHEAD_TOP = SUBHEAD_Y
+CONTENT_TOP = BODY_Y
+
+CARD_GAP = Emu(228600)
+CARD_RADIUS = Emu(91440)
+ACCENT_BAR_W = Emu(68580)
+
+# 表紙・章扉の帯高さ
+COVER_BAND_H = Emu(2286000)
+SECTION_TITLE_Y = Emu(2800000)
+CLOSING_TEXT_Y = Emu(2800000)
+
+# 箇条書き・アジェンダ行高
+BULLET_LINE_H = Emu(550000)
+AGENDA_LINE_H = Emu(650000)
+
+
+def set_jp_font(
+    run,
+    name: str = FONT_JP,
+    size: Pt | None = None,
+    color: RGBColor | None = None,
+    bold: bool = False,
+) -> None:
+    """日本語フォントを ea 属性含めて確実に適用する。
+
+    python-pptx は ``run.font.name`` だけでは東アジア文字に別フォントが
+    当たることがあるため、``a:ea`` を XML に明示する。
+    """
+    run.font.name = name
+    run.font.bold = bold
+    if size is not None:
+        run.font.size = size
+    if color is not None:
+        run.font.color.rgb = color
+
+    r_pr = run._element.get_or_add_rPr()
+    ea = r_pr.find(qn("a:ea"))
+    if ea is None:
+        ea = r_pr.makeelement(qn("a:ea"), {})
+        r_pr.append(ea)
+    ea.set("typeface", name)
+
+
+def gradient_steps_for_levels(level_count: int) -> list[RGBColor]:
+    """ピラミッド等で levels 数に応じたグラデ色リストを返す。
+
+    Args:
+        level_count: 段数（3〜4 想定）。
+
+    Returns:
+        上から濃い順の RGBColor リスト。
+    """
+    n = max(1, min(level_count, len(GRADIENT_STEPS)))
+    return GRADIENT_STEPS[:n]
+
+
+# ============================================================
+# slideData スキーマ定義
+# ============================================================
+
 PHASE1_TYPES = frozenset({"title", "section", "content", "agenda", "closing"})
 
-# --- 全 type（将来拡張用） ---
 ALL_TYPES = PHASE1_TYPES | frozenset({
     "kpi", "barCompare", "compare", "table",
     "pyramid", "triangle", "timeline", "process", "cycle",
 })
 
-# --- type 別必須フィールド ---
 REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "title": ("title", "date"),
     "section": ("title",),
@@ -71,7 +177,6 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "cycle": ("title", "items"),
 }
 
-# --- 固定数制約 ---
 FIXED_COUNT: dict[str, int] = {
     "triangle": 3,
     "cycle": 4,
@@ -84,10 +189,8 @@ MAX_COUNT: dict[str, int] = {
     "pyramid_levels_max": 4,
 }
 
-# --- テキストルール ---
 FORBIDDEN_SYMBOLS = ("■", "→")
 NOTES_FORBIDDEN_MARKUP = ("**", "[[", "]]")
 AUTO_NUMBER_TYPES = frozenset({"agenda", "process", "timeline"})
 
-# 先頭番号パターン（自動番号描画 type 用）
 LEADING_NUMBER_PATTERN = r"^[\d①②③④⑤⑥⑦⑧⑨⑩]+[\.\)、．\s]|^STEP\s*\d+|^第\d+"

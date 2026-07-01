@@ -8,6 +8,7 @@ from typing import Any
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Pt
 
@@ -19,20 +20,11 @@ _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _EMPHASIS_RE = re.compile(r"\[\[(.+?)\]\]")
 
 
-def _hex_to_rgb(hex_color: str) -> RGBColor:
-    """#RRGGBB を RGBColor に変換する。"""
-    h = hex_color.lstrip("#")
-    return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-
-
-def _set_font(run, *, size: Pt | None = None, bold: bool = False, color: str | None = None) -> None:
-    """run にフォント属性を設定する。"""
-    run.font.name = schema.FONT_FAMILIES[0]
-    if size:
-        run.font.size = size
-    run.font.bold = bold
-    if color:
-        run.font.color.rgb = _hex_to_rgb(color)
+def _fill_solid(shape, color: RGBColor) -> None:
+    """図形を単色塗りにする。"""
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = color
+    shape.line.fill.background()
 
 
 def _add_textbox(
@@ -43,9 +35,9 @@ def _add_textbox(
     height: Emu,
     text: str,
     *,
-    font_size: Pt = schema.FONT_BODY,
+    font_size: Pt = schema.SIZE_BODY,
     bold: bool = False,
-    color: str = schema.COLOR_TEXT,
+    color: RGBColor = schema.TEXT_MAIN,
     align: PP_ALIGN = PP_ALIGN.LEFT,
 ) -> Any:
     """単純テキストボックスを追加する。"""
@@ -57,7 +49,7 @@ def _add_textbox(
     p.alignment = align
     run = p.add_run()
     run.text = text
-    _set_font(run, size=font_size, bold=bold, color=color)
+    schema.set_jp_font(run, size=font_size, color=color, bold=bold)
     return box
 
 
@@ -69,8 +61,8 @@ def _add_rich_textbox(
     height: Emu,
     text: str,
     *,
-    font_size: Pt = schema.FONT_BODY,
-    color: str = schema.COLOR_TEXT,
+    font_size: Pt = schema.SIZE_BODY,
+    color: RGBColor = schema.TEXT_MAIN,
 ) -> Any:
     """**太字** と [[強調]] を解釈するテキストボックス。"""
     box = slide.shapes.add_textbox(left, top, width, height)
@@ -80,14 +72,18 @@ def _add_rich_textbox(
     p = tf.paragraphs[0]
     p.alignment = PP_ALIGN.LEFT
 
-    segments = _parse_inline_markup(text)
-    for seg_text, seg_bold, seg_emphasis in segments:
+    for seg_text, seg_bold, seg_emphasis in _parse_inline_markup(text):
         if not seg_text:
             continue
         run = p.add_run()
         run.text = seg_text
-        seg_color = schema.COLOR_PRIMARY if seg_emphasis else color
-        _set_font(run, size=font_size, bold=seg_bold or seg_emphasis, color=seg_color)
+        seg_color = schema.PRIMARY if seg_emphasis else color
+        schema.set_jp_font(
+            run,
+            size=font_size,
+            color=seg_color,
+            bold=seg_bold or seg_emphasis,
+        )
 
     return box
 
@@ -126,88 +122,92 @@ def _add_slide(prs: Presentation):
     return prs.slides.add_slide(_blank_layout(prs))
 
 
-def _content_width() -> Emu:
-    return schema.SLIDE_WIDTH - schema.MARGIN_LEFT - schema.MARGIN_RIGHT
-
-
 def _draw_title_header(slide, s: dict[str, Any]) -> None:
-    """共通タイトル＋サブヘッドを描画する。"""
+    """共通タイトル帯（左アクセントバー + タイトル + subhead）を描画する。"""
+    # 左縦アクセントバー
+    bar = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        schema.MARGIN_X - schema.ACCENT_BAR_W,
+        schema.TITLE_Y,
+        schema.ACCENT_BAR_W,
+        schema.TITLE_H,
+    )
+    _fill_solid(bar, schema.ACCENT)
+
     title = s.get("title", "")
     if title:
         _add_textbox(
             slide,
-            schema.MARGIN_LEFT,
-            schema.TITLE_TOP,
-            _content_width(),
-            Emu(800000),
+            schema.MARGIN_X,
+            schema.TITLE_Y,
+            schema.CONTENT_W,
+            schema.TITLE_H,
             title,
-            font_size=schema.FONT_TITLE,
+            font_size=schema.SIZE_TITLE,
             bold=True,
-            color=schema.COLOR_PRIMARY,
+            color=schema.PRIMARY,
         )
+
     subhead = s.get("subhead")
     if subhead:
         _add_textbox(
             slide,
-            schema.MARGIN_LEFT,
-            schema.SUBHEAD_TOP,
-            _content_width(),
+            schema.MARGIN_X,
+            schema.SUBHEAD_Y,
+            schema.CONTENT_W,
             Emu(400000),
             subhead,
-            font_size=schema.FONT_SUBHEAD,
-            color=schema.COLOR_GRAY,
+            font_size=schema.SIZE_SUBHEAD,
+            color=schema.TEXT_SUB,
         )
 
 
 def render_title(prs: Presentation, s: dict[str, Any]) -> None:
     """表紙スライドを描画する。"""
     slide = _add_slide(prs)
-    # 背景アクセント帯
     band = slide.shapes.add_shape(
-        1,  # MSO_SHAPE.RECTANGLE
+        MSO_SHAPE.RECTANGLE,
         Emu(0),
         Emu(0),
-        schema.SLIDE_WIDTH,
-        Emu(2286000),
+        schema.SLIDE_W,
+        schema.COVER_BAND_H,
     )
-    band.fill.solid()
-    band.fill.fore_color.rgb = _hex_to_rgb(schema.COLOR_PRIMARY)
-    band.line.fill.background()
+    _fill_solid(band, schema.PRIMARY)
 
     title = s.get("title", "")
     _add_textbox(
         slide,
-        schema.MARGIN_LEFT,
+        schema.MARGIN_X,
         Emu(2000000),
-        _content_width(),
+        schema.CONTENT_W,
         Emu(1200000),
         title,
-        font_size=Pt(40),
+        font_size=schema.SIZE_TITLE_COVER,
         bold=True,
-        color=schema.COLOR_TEXT_LIGHT,
+        color=schema.TEXT_ON_FILL,
     )
+
     date_str = s.get("date", "")
     if date_str:
         _add_textbox(
             slide,
-            schema.MARGIN_LEFT,
+            schema.MARGIN_X,
             Emu(5200000),
-            _content_width(),
+            schema.CONTENT_W,
             Emu(400000),
             date_str,
-            font_size=schema.FONT_SUBHEAD,
-            color=schema.COLOR_GRAY,
+            font_size=schema.SIZE_CAPTION,
+            color=schema.TEXT_SUB,
         )
 
 
 def render_section(prs: Presentation, s: dict[str, Any]) -> None:
     """章扉スライドを描画する。"""
     slide = _add_slide(prs)
-    # 背景
-    bg = slide.shapes.add_shape(1, Emu(0), Emu(0), schema.SLIDE_WIDTH, schema.SLIDE_HEIGHT)
-    bg.fill.solid()
-    bg.fill.fore_color.rgb = _hex_to_rgb(schema.COLOR_SECTION_BG)
-    bg.line.fill.background()
+    bg = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE, Emu(0), Emu(0), schema.SLIDE_W, schema.SLIDE_H,
+    )
+    _fill_solid(bg, schema.PRIMARY)
 
     section_no = s.get("sectionNo")
     if section_no is not None:
@@ -218,23 +218,23 @@ def render_section(prs: Presentation, s: dict[str, Any]) -> None:
             Emu(10000000),
             Emu(5000000),
             str(section_no),
-            font_size=schema.FONT_SECTION_NO,
+            font_size=schema.SIZE_SECTION_NO,
             bold=True,
-            color="#334155",
+            color=schema.SECTION_NO_FILL,
             align=PP_ALIGN.LEFT,
         )
 
     title = s.get("title", "")
     _add_textbox(
         slide,
-        schema.MARGIN_LEFT,
-        Emu(2800000),
-        _content_width(),
+        schema.MARGIN_X,
+        schema.SECTION_TITLE_Y,
+        schema.CONTENT_W,
         Emu(1500000),
         title,
-        font_size=schema.FONT_SECTION,
+        font_size=schema.SIZE_TITLE_SECTION,
         bold=True,
-        color=schema.COLOR_TEXT_LIGHT,
+        color=schema.TEXT_ON_FILL,
     )
 
 
@@ -243,30 +243,29 @@ def render_content(prs: Presentation, s: dict[str, Any]) -> None:
     slide = _add_slide(prs)
     _draw_title_header(slide, s)
 
+    gap = schema.CARD_GAP
     if s.get("twoColumn") and s.get("columns"):
         cols = s["columns"]
-        col_w = (_content_width() - Emu(200000)) // 2
+        col_w = (schema.CONTENT_W - gap) // 2
         for ci, col_items in enumerate(cols[:2]):
-            left = schema.MARGIN_LEFT + ci * (col_w + Emu(200000))
-            _draw_bullet_list(slide, left, schema.CONTENT_TOP, col_w, col_items or [])
+            left = schema.MARGIN_X + ci * (col_w + gap)
+            _draw_bullet_list(slide, left, schema.BODY_Y, col_w, col_items or [])
     else:
         points = s.get("points") or []
-        _draw_bullet_list(slide, schema.MARGIN_LEFT, schema.CONTENT_TOP, _content_width(), points)
+        _draw_bullet_list(slide, schema.MARGIN_X, schema.BODY_Y, schema.CONTENT_W, points)
 
 
 def _draw_bullet_list(slide, left: Emu, top: Emu, width: Emu, items: list[str]) -> None:
     """箇条書きリストを描画する。"""
-    line_height = Emu(550000)
     for i, item in enumerate(items):
-        y = top + i * line_height
-        # ビュレット
+        y = top + i * schema.BULLET_LINE_H
         _add_textbox(
-            slide, left, y, Emu(200000), line_height,
-            "•", font_size=schema.FONT_BODY, color=schema.COLOR_ACCENT,
+            slide, left, y, Emu(200000), schema.BULLET_LINE_H,
+            "•", font_size=schema.SIZE_BODY, color=schema.ACCENT,
         )
         _add_rich_textbox(
-            slide, left + Emu(250000), y, width - Emu(250000), line_height,
-            item, font_size=schema.FONT_BODY,
+            slide, left + Emu(250000), y, width - Emu(250000), schema.BULLET_LINE_H,
+            item, font_size=schema.SIZE_BODY,
         )
 
 
@@ -276,39 +275,38 @@ def render_agenda(prs: Presentation, s: dict[str, Any]) -> None:
     _draw_title_header(slide, s)
 
     items = s.get("items") or []
-    line_height = Emu(650000)
     for i, item in enumerate(items):
-        y = schema.CONTENT_TOP + i * line_height
+        y = schema.BODY_Y + i * schema.AGENDA_LINE_H
         num_text = f"{i + 1:02d}"
         _add_textbox(
-            slide, schema.MARGIN_LEFT, y, Emu(600000), line_height,
-            num_text, font_size=schema.FONT_AGENDA_ITEM, bold=True, color=schema.COLOR_ACCENT,
+            slide, schema.MARGIN_X, y, Emu(600000), schema.AGENDA_LINE_H,
+            num_text, font_size=schema.SIZE_BODY, bold=True, color=schema.ACCENT,
         )
         _add_textbox(
-            slide, schema.MARGIN_LEFT + Emu(700000), y,
-            _content_width() - Emu(700000), line_height,
-            item, font_size=schema.FONT_AGENDA_ITEM,
+            slide, schema.MARGIN_X + Emu(700000), y,
+            schema.CONTENT_W - Emu(700000), schema.AGENDA_LINE_H,
+            item, font_size=schema.SIZE_BODY,
         )
 
 
 def render_closing(prs: Presentation, s: dict[str, Any]) -> None:
     """結びスライドを描画する。"""
     slide = _add_slide(prs)
-    bg = slide.shapes.add_shape(1, Emu(0), Emu(0), schema.SLIDE_WIDTH, schema.SLIDE_HEIGHT)
-    bg.fill.solid()
-    bg.fill.fore_color.rgb = _hex_to_rgb(schema.COLOR_PRIMARY)
-    bg.line.fill.background()
+    bg = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE, Emu(0), Emu(0), schema.SLIDE_W, schema.SLIDE_H,
+    )
+    _fill_solid(bg, schema.PRIMARY)
 
     _add_textbox(
         slide,
-        schema.MARGIN_LEFT,
-        Emu(2800000),
-        _content_width(),
+        schema.MARGIN_X,
+        schema.CLOSING_TEXT_Y,
+        schema.CONTENT_W,
         Emu(1200000),
         "ご清聴ありがとうございました",
-        font_size=Pt(36),
+        font_size=schema.SIZE_TITLE_SECTION,
         bold=True,
-        color=schema.COLOR_TEXT_LIGHT,
+        color=schema.TEXT_ON_FILL,
         align=PP_ALIGN.CENTER,
     )
 
@@ -331,14 +329,14 @@ def build_pptx(slide_data: list[dict[str, Any]], out_path: str, template: str | 
         template: 任意のテンプレートパス。
     """
     prs = Presentation(template) if template else Presentation()
-    prs.slide_width = schema.SLIDE_WIDTH
-    prs.slide_height = schema.SLIDE_HEIGHT
+    prs.slide_width = schema.SLIDE_W
+    prs.slide_height = schema.SLIDE_H
 
     for s in slide_data:
         slide_type = s.get("type", "content")
-        renderer = RENDERERS.get(slide_type, render_content)
+        renderer_fn = RENDERERS.get(slide_type, render_content)
         try:
-            renderer(prs, s)
+            renderer_fn(prs, s)
         except Exception as exc:
             logger.warning("skip slide type=%s err=%s", slide_type, exc)
 
