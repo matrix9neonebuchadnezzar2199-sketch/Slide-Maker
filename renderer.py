@@ -671,12 +671,31 @@ def build_pptx(slide_data: list[dict[str, Any]], out_path: str, template: str | 
     prs.slide_width = schema.SLIDE_W
     prs.slide_height = schema.SLIDE_H
 
-    for s in slide_data:
+    logger.info("build_pptx start slides=%d out=%s", len(slide_data), out_path)
+    for index, s in enumerate(slide_data, start=1):
         slide_type = s.get("type", "content")
         renderer_fn = RENDERERS.get(slide_type, render_content)
+        points = s.get("points") or []
+        headers = s.get("headers") or []
+        rows = s.get("rows") or []
+        markdown_table_points = sum(
+            1 for point in points
+            if isinstance(point, str) and is_markdown_table_row(point)
+        )
+        logger.info(
+            "dispatch slide=%d type=%s renderer=%s headers=%d rows=%d points=%d md_table_points=%d",
+            index,
+            slide_type,
+            renderer_fn.__name__,
+            len(headers),
+            len(rows),
+            len(points),
+            markdown_table_points,
+        )
         try:
             renderer_fn(prs, s)
         except Exception as exc:
-            logger.warning("skip slide type=%s err=%s", slide_type, exc)
+            logger.warning("skip slide=%d type=%s err=%s", index, slide_type, exc)
 
     prs.save(out_path)
+    logger.info("build_pptx saved out=%s", out_path)
