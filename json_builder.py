@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import extractor
 import llm_mode
@@ -35,21 +35,34 @@ def build_from_pdf(
     mode: Mode = "rule",
     *,
     cover_title: str | None = None,
-) -> list[dict[str, Any]]:
+    use_llm_title_fix: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
     """PDF から slideData を生成する。
 
     Args:
         pdf_path: 入力 PDF パス。
         mode: ``rule`` または ``llm``。
         cover_title: ユーザー指定の表紙タイトル（空ならフォールバック）。
+        use_llm_title_fix: ルール生成後に LLM で長いタイトルを短縮する。
+        progress_callback: LLM タイトル整形の進捗 ``(current, total, message)``。
 
     Returns:
-        slideData 配列。
+        ``(slideData 配列, LLM スキップ理由 or None)``。
     """
     path = Path(pdf_path)
     text = extractor.extract_text_from_pdf(path)
     stem = path.stem
 
     if mode == "llm":
-        return llm_mode.build_slide_data(text, pdf_stem=stem, cover_title=cover_title)
-    return rule_mode.build_slide_data(text, pdf_stem=stem, cover_title=cover_title)
+        data = llm_mode.build_slide_data(text, pdf_stem=stem, cover_title=cover_title)
+        return data, None
+
+    data = rule_mode.build_slide_data(text, pdf_stem=stem, cover_title=cover_title)
+    llm_status: str | None = None
+    if use_llm_title_fix:
+        data, llm_status = llm_mode.apply_title_fix(
+            data,
+            progress_callback=progress_callback,
+        )
+    return data, llm_status

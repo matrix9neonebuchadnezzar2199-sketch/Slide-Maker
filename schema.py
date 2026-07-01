@@ -216,3 +216,10 @@ NOTES_FORBIDDEN_MARKUP = ("**", "[[", "]]")
 AUTO_NUMBER_TYPES = frozenset({"agenda", "process", "timeline"})
 
 LEADING_NUMBER_PATTERN = r"^[\d①②③④⑤⑥⑦⑧⑨⑩]+[\.\)、．\s]|^STEP\s*\d+|^第\d+"
+
+# LLM タイトル短縮（Stage 1）
+TITLE_SHORTEN_THRESHOLD = 30
+TITLE_SHORTEN_MAX = 20
+LLM_TIMEOUT_SEC = 15
+LLM_MAX_TOKENS = 32
+LLM_TEMPERATURE = 0.1

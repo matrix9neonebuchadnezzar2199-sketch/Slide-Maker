@@ -72,6 +72,7 @@ class SlideMakerApp:
         self._cover_title = tk.StringVar()
         self._output_dir = tk.StringVar()
         self._mode = tk.StringVar(value="rule")
+        self._use_llm_title_fix = tk.BooleanVar(value=False)
         self._status = tk.StringVar(value="準備完了")
         self._busy = False
 
@@ -164,6 +165,19 @@ class SlideMakerApp:
             mode_row, text="JSON 生成", style="Accent.TButton", command=self._on_generate_json,
         )
         self._btn_json.pack(side=tk.LEFT, padx=(24, 0))
+
+        llm_row = ttk.Frame(card, style="Card.TFrame")
+        llm_row.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        ttk.Checkbutton(
+            llm_row,
+            text="LLMでタイトルを整える（実験的・下書き補助）",
+            variable=self._use_llm_title_fix,
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            llm_row,
+            text="model/*.gguf 配置時のみ有効。長い content/table タイトルを短縮します。",
+            style="CardMuted.TLabel",
+        ).pack(side=tk.LEFT, padx=(12, 0))
 
     def _add_labeled_entry(
         self,
@@ -321,17 +335,27 @@ class SlideMakerApp:
 
         mode = self._mode.get()
         cover_title = self._cover_title.get().strip()
+        use_llm_title_fix = self._use_llm_title_fix.get() and mode == "rule"
         self._set_busy(True, "JSON生成中...")
+
+        def progress_callback(current: int, total: int, message: str) -> None:
+            self.root.after(
+                0,
+                lambda c=current, t=total, m=message: self._status.set(f"{m} ({c}/{t})"),
+            )
 
         def worker() -> None:
             try:
-                data = json_builder.build_from_pdf(
+                data, llm_note = json_builder.build_from_pdf(
                     pdf,
                     mode=mode,  # type: ignore[arg-type]
                     cover_title=cover_title or None,
+                    use_llm_title_fix=use_llm_title_fix,
+                    progress_callback=progress_callback if use_llm_title_fix else None,
                 )
                 text = json.dumps(data, ensure_ascii=False, indent=2)
-                self.root.after(0, lambda: self._finish_json_ok(text))
+                finish_status = llm_note or "JSON生成完了"
+                self.root.after(0, lambda: self._finish_json_ok(text, finish_status))
             except LlmModeNotImplementedError as exc:
                 self.root.after(0, lambda: self._finish_error(str(exc)))
             except Exception as exc:
@@ -340,11 +364,11 @@ class SlideMakerApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_json_ok(self, text: str) -> None:
+    def _finish_json_ok(self, text: str, status: str = "JSON生成完了") -> None:
         """JSON 生成成功時の UI 更新。"""
         self._json_text.delete("1.0", tk.END)
         self._json_text.insert(tk.END, text)
-        self._set_busy(False, "JSON生成完了")
+        self._set_busy(False, status)
 
     def _finish_error(self, msg: str) -> None:
         """エラー時の UI 更新。"""
