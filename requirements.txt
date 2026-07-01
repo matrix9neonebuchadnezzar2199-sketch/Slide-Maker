@@ -1,0 +1,2 @@
+pymupdf4llm>=0.0.17
+python-pptx>=1.0.2
