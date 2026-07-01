@@ -114,17 +114,27 @@ def collect_warnings(data: Any) -> list[str]:
         return warnings
 
     for idx, slide in enumerate(data, start=1):
-        if not isinstance(slide, dict) or slide.get("type") != "table":
+        if not isinstance(slide, dict):
             continue
-        headers = slide.get("headers") or []
-        rows = slide.get("rows") or []
-        n_cols = len(headers) if isinstance(headers, list) else 0
-        n_rows = len(rows) if isinstance(rows, list) else 0
-        if n_cols > schema.TABLE_WARN_COLS or n_cols * n_rows > schema.TABLE_WARN_CELLS:
-            warnings.append(
-                f"スライド {idx}: この表は大きすぎます（{n_cols}列×{n_rows}行）。"
-                "LLMモードでのグラフ化、または手動分割を推奨します。"
-            )
+
+        if slide.get("type") == "table":
+            headers = slide.get("headers") or []
+            rows = slide.get("rows") or []
+            n_cols = len(headers) if isinstance(headers, list) else 0
+            n_rows = len(rows) if isinstance(rows, list) else 0
+            if n_cols > schema.TABLE_WARN_COLS or n_cols * n_rows > schema.TABLE_WARN_CELLS:
+                warnings.append(
+                    f"スライド {idx}: この表は大きすぎます（{n_cols}列×{n_rows}行）。"
+                    "LLMモードでのグラフ化、または手動分割を推奨します。"
+                )
+
+        if slide.get("type") == "content":
+            points = slide.get("points")
+            if points is None or (isinstance(points, list) and len(points) == 0):
+                warnings.append(
+                    f"スライド {idx}: content の points が空です。"
+                    "空スライドになる可能性があります。"
+                )
 
     return warnings
 

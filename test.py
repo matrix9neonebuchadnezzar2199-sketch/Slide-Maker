@@ -163,7 +163,7 @@ def test_user_markdown_table_to_slide_data() -> None:
 
     title_slide = slides[0]
     assert title_slide["type"] == "title"
-    assert "くら寿司" in title_slide["title"]
+    assert title_slide["title"] == "くら寿司5月度月次情報"
     assert title_slide["title"] != "2026年6月18日"
 
     table_slides = [s for s in slides if s.get("type") == "table"]
@@ -188,6 +188,46 @@ def test_user_title_skips_date_only_content() -> None:
     assert "2026年6月18日" not in content_titles
 
 
+def test_user_cover_title_first_h2_not_later_heading() -> None:
+    """最初の H2 が表紙になり、後続の H2 は表紙にならない。"""
+    text = """2026年6月18日
+
+## くら寿司5月度月次情報
+
+|指標|5月|
+|---|---|
+|売上|100|
+
+## 1Q
+
+## 年度
+
+## ◎日本・米国・アジア店舗数推移
+
+|国|5月|
+|---|---|
+|日本|10|
+"""
+    slides = rule_mode.build_slide_data(text, pdf_stem="fallback")
+    assert slides[0]["title"] == "くら寿司5月度月次情報"
+
+    empty_content = [
+        s for s in slides
+        if s.get("type") == "content" and not s.get("points")
+    ]
+    assert empty_content == []
+
+    store_table = [s for s in slides if s.get("type") == "table" and "店舗数" in s.get("title", "")]
+    assert len(store_table) == 1
+    assert store_table[0]["title"] == "◎日本・米国・アジア店舗数推移"
+
+    cover_dup_content = [
+        s for s in slides
+        if s.get("type") == "content" and s.get("title") == "くら寿司5月度月次情報"
+    ]
+    assert cover_dup_content == []
+
+
 def run_all() -> int:
     """全シナリオを実行し、失敗数を返す。"""
     tests = [
@@ -200,6 +240,7 @@ def run_all() -> int:
         test_user_business_number_formats,
         test_user_markdown_table_to_slide_data,
         test_user_title_skips_date_only_content,
+        test_user_cover_title_first_h2_not_later_heading,
     ]
     failed = 0
     for fn in tests:

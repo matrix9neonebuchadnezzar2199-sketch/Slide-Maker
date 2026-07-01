@@ -50,11 +50,11 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
     agenda_items: list[str] = []
     pending_agenda = False
 
-    title = _guess_title(blocks, pdf_stem)
+    cover_title = _find_cover_title(text, pdf_stem)
     cover_date = _extract_cover_date(blocks) or date.today().strftime("%Y.%m.%d")
     slides.append({
         "type": "title",
-        "title": title,
+        "title": cover_title,
         "date": cover_date,
     })
 
@@ -77,7 +77,7 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
                 "title": heading,
                 "sectionNo": section_counter,
             })
-            slides.extend(_slides_from_body(heading, body_lines))
+            slides.extend(_slides_from_body(heading, body_lines, cover_title=cover_title))
             continue
 
         if block_type == "closing":
@@ -88,7 +88,7 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
         if _is_date_only(heading) and not body_lines:
             continue
 
-        slides.extend(_slides_from_body(heading, body_lines))
+        slides.extend(_slides_from_body(heading, body_lines, cover_title=cover_title))
 
     if agenda_items:
         slides.insert(1, {
@@ -103,7 +103,12 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
     return slides
 
 
-def _slides_from_body(heading: str, body_lines: list[str]) -> list[dict[str, Any]]:
+def _slides_from_body(
+    heading: str,
+    body_lines: list[str],
+    *,
+    cover_title: str = "",
+) -> list[dict[str, Any]]:
     """本文行からスライド（table / 特殊 / content）を生成する。"""
     result: list[dict[str, Any]] = []
     tables, remaining = detect_markdown_tables(body_lines)
@@ -132,15 +137,19 @@ def _slides_from_body(heading: str, body_lines: list[str]) -> list[dict[str, Any
         return result
 
     points = [p for p in cleaned if p and not _is_date_only(p)]
-    if points or (heading and not _is_date_only(heading)):
-        slide: dict[str, Any] = {
-            "type": "content",
-            "title": heading or "内容",
-        }
-        if points:
-            slide["points"] = points[:8]
-        if heading or points:
-            result.append(slide)
+    # points が空の content は生成しない（表見出しだけの殻スライド防止）
+    if not points:
+        return result
+
+    # 表紙タイトルと同一で、既に table 等を出している場合は content を重複させない
+    if heading == cover_title and result:
+        return result
+
+    result.append({
+        "type": "content",
+        "title": heading or "内容",
+        "points": points[:8],
+    })
 
     return result
 
@@ -335,34 +344,68 @@ def _extract_cover_date(blocks: list[str]) -> str | None:
     return None
 
 
-def _guess_title(blocks: list[str], pdf_stem: str) -> str:
-    """## 見出し（日付以外）を優先してタイトルを推定する。"""
-    for block in blocks:
-        for line in block.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("## "):
-                h = _extract_heading(stripped)
-                if h and not _is_date_only(h):
-                    return h
+def _is_valid_cover_title(text: str) -> bool:
+    """表紙タイトル候補として妥当かどうか。"""
+    if not text or not text.strip():
+        return False
+    if _is_date_only(text):
+        return False
+    if is_markdown_table_row(text) or text.strip().startswith("|"):
+        return False
+    return True
 
-    for block in blocks:
-        for line in block.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("# "):
-                h = _extract_heading(stripped)
-                if h and not _is_date_only(h):
-                    return h
 
-    for block in blocks:
-        for line in block.splitlines():
-            h = _extract_heading(line)
-            if h and not _is_date_only(h):
-                return h
-            stripped = line.strip()
-            if stripped and not _is_date_only(stripped) and not is_markdown_table_row(stripped):
-                return stripped
+def _parse_heading_level(line: str) -> tuple[int, str] | None:
+    """見出し行のレベルとタイトル文字列を返す。"""
+    stripped = line.strip()
+    for level, pattern in ((1, _H1_RE), (2, _H2_RE), (3, _H3_RE)):
+        m = pattern.match(stripped)
+        if m:
+            return level, m.group(1).strip()
+    return None
+
+
+def _find_cover_title(text: str, pdf_stem: str) -> str:
+    """文書先頭から走査し、最初の有効 H2 を表紙タイトルに確定する。
+
+    見つかった時点で即 return（後続の見出しは見ない）。
+    H2 が無い場合は、最初の表より前にある最初の見出しを fallback とする。
+    """
+    # 優先1: 最初の H2（日付・表行以外）
+    for line in text.splitlines():
+        parsed = _parse_heading_level(line)
+        if parsed is None:
+            continue
+        level, title = parsed
+        if level == 2 and _is_valid_cover_title(title):
+            return title
+
+    # 優先2: 最初の H1
+    for line in text.splitlines():
+        parsed = _parse_heading_level(line)
+        if parsed is None:
+            continue
+        level, title = parsed
+        if level == 1 and _is_valid_cover_title(title):
+            return title
+
+    # 優先3: 最初の Markdown 表より前にある最初の見出し（### 含む）
+    for line in text.splitlines():
+        if is_markdown_table_row(line):
+            break
+        parsed = _parse_heading_level(line)
+        if parsed is None:
+            continue
+        _, title = parsed
+        if _is_valid_cover_title(title):
+            return title
 
     return pdf_stem
+
+
+def _guess_title(blocks: list[str], pdf_stem: str) -> str:
+    """後方互換 — 全文から表紙タイトルを推定する。"""
+    return _find_cover_title("\n\n".join(blocks), pdf_stem)
 
 
 def _empty_fallback(pdf_stem: str) -> list[dict[str, Any]]:
