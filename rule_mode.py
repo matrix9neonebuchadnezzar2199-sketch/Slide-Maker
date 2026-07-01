@@ -6,6 +6,7 @@ import re
 from datetime import date
 from typing import Any
 
+from table_parser import detect_markdown_tables, is_markdown_table_row
 from utils import parse_number
 
 # 見出しパターン（Markdown / 日本語文書向け）
@@ -16,18 +17,26 @@ _BULLET_RE = re.compile(r"^[\-\*•・]\s+(.+)$", re.MULTILINE)
 _NUMBERED_RE = re.compile(r"^\d+[\.\)、．]\s*(.+)$", re.MULTILINE)
 _TAB_ROW_RE = re.compile(r"\t")
 
+# 日付のみの行（表紙 date 用・タイトル除外）
+_DATE_LINE_RE = re.compile(
+    r"^(\d{4})[年.\-/](\d{1,2})[月.\-/](\d{1,2})日?\s*$"
+    r"|^(\d{4})\.(\d{2})\.(\d{2})\s*$",
+)
+
 _AGENDA_KEYWORDS = ("目次", "アジェンダ", "agenda", "Agenda", "概要")
 _SECTION_KEYWORDS = ("章", "パート", "Part", "PART", "第")
 _CLOSING_KEYWORDS = ("まとめ", "おわりに", "結論", "ご清聴", "Thank", "thank")
 
-_COMPARE_KEYWORDS = re.compile(
-    r"対|vs|VS|比較|メリット|デメリット|従来|新方式|Before|After",
+# compare は明示的対比語のみ（「対」「比較」単独は除外）
+_COMPARE_STRONG_RE = re.compile(
+    r"vs\.?|VS|対比|メリット|デメリット|従来\s*/\s*新|従来/新|新方式|Before|After",
+    re.IGNORECASE,
 )
 _KPI_KEYWORDS = re.compile(r"売上|達成率|件数|人数|KPI|kpi|利益|成長")
 _NUMERIC_UNIT_RE = re.compile(
     r"[\d,]+\.?\d*\s*[%％円万件人台回]|約[\d,]+",
 )
-_BAR_COMPARE_RE = re.compile(r"前年|前月|対比|昨年|目標|実績|予算")
+_BAR_COMPARE_RE = re.compile(r"前年比|前月比|昨年対|目標対|実績対|予算対")
 
 
 def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション") -> list[dict[str, Any]]:
@@ -42,10 +51,11 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
     pending_agenda = False
 
     title = _guess_title(blocks, pdf_stem)
+    cover_date = _extract_cover_date(blocks) or date.today().strftime("%Y.%m.%d")
     slides.append({
         "type": "title",
         "title": title,
-        "date": date.today().strftime("%Y.%m.%d"),
+        "date": cover_date,
     })
 
     for block in blocks:
@@ -67,34 +77,18 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
                 "title": heading,
                 "sectionNo": section_counter,
             })
-            special = _detect_special_slide(heading, body_lines)
-            if special:
-                slides.append(special)
-            elif body_lines:
-                points = [_clean_bullet(line) for line in body_lines if line.strip()]
-                if points:
-                    slides.append({
-                        "type": "content",
-                        "title": heading,
-                        "points": points[:8],
-                    })
+            slides.extend(_slides_from_body(heading, body_lines))
             continue
 
         if block_type == "closing":
             slides.append({"type": "closing"})
             continue
 
-        special = _detect_special_slide(heading, body_lines)
-        if special:
-            slides.append(special)
+        # 日付のみブロックは表紙で処理済み — 独立スライドにしない
+        if _is_date_only(heading) and not body_lines:
             continue
 
-        if heading:
-            points = [_clean_bullet(line) for line in body_lines if line.strip()]
-            slide: dict[str, Any] = {"type": "content", "title": heading}
-            if points:
-                slide["points"] = points[:8]
-            slides.append(slide)
+        slides.extend(_slides_from_body(heading, body_lines))
 
     if agenda_items:
         slides.insert(1, {
@@ -109,14 +103,58 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
     return slides
 
 
-def _detect_special_slide(heading: str, body_lines: list[str]) -> dict[str, Any] | None:
-    """数値・比較構造を検出して第2弾パターンを返す。"""
-    combined = heading + "\n" + "\n".join(body_lines)
-    cleaned = [_clean_bullet(line) for line in body_lines if line.strip()]
+def _slides_from_body(heading: str, body_lines: list[str]) -> list[dict[str, Any]]:
+    """本文行からスライド（table / 特殊 / content）を生成する。"""
+    result: list[dict[str, Any]] = []
+    tables, remaining = detect_markdown_tables(body_lines)
 
-    table_slide = _try_table(heading, body_lines)
-    if table_slide:
-        return table_slide
+    for tbl in tables:
+        slide = dict(tbl)
+        slide["title"] = heading or "データ一覧"
+        result.append(slide)
+
+    # タブ区切り表
+    tab_slide = _try_tab_table(heading, remaining)
+    if tab_slide:
+        result.append(tab_slide)
+        remaining = [ln for ln in remaining if "\t" not in ln]
+
+    # 非表行のみで特殊パターン判定
+    non_table_lines = [
+        ln for ln in remaining
+        if ln.strip() and not is_markdown_table_row(ln)
+    ]
+    cleaned = [_clean_bullet(line) for line in non_table_lines if line.strip()]
+
+    special = _detect_special_slide(heading, cleaned, non_table_lines)
+    if special:
+        result.append(special)
+        return result
+
+    points = [p for p in cleaned if p and not _is_date_only(p)]
+    if points or (heading and not _is_date_only(heading)):
+        slide: dict[str, Any] = {
+            "type": "content",
+            "title": heading or "内容",
+        }
+        if points:
+            slide["points"] = points[:8]
+        if heading or points:
+            result.append(slide)
+
+    return result
+
+
+def _detect_special_slide(
+    heading: str,
+    cleaned: list[str],
+    raw_lines: list[str],
+) -> dict[str, Any] | None:
+    """数値・比較構造を検出して第2弾パターンを返す。"""
+    if _lines_look_like_table(raw_lines):
+        return None
+
+    combined = heading + "\n" + "\n".join(raw_lines)
 
     compare_slide = _try_compare(heading, cleaned, combined)
     if compare_slide:
@@ -133,7 +171,12 @@ def _detect_special_slide(heading: str, body_lines: list[str]) -> dict[str, Any]
     return None
 
 
-def _try_table(heading: str, body_lines: list[str]) -> dict[str, Any] | None:
+def _lines_look_like_table(lines: list[str]) -> bool:
+    """行群が表形式かどうか。"""
+    return sum(1 for ln in lines if is_markdown_table_row(ln)) >= 2
+
+
+def _try_tab_table(heading: str, body_lines: list[str]) -> dict[str, Any] | None:
     """タブ区切り行から table を生成する。"""
     tab_rows = [line for line in body_lines if _TAB_ROW_RE.search(line)]
     if len(tab_rows) < 2:
@@ -149,19 +192,23 @@ def _try_table(heading: str, body_lines: list[str]) -> dict[str, Any] | None:
         "type": "table",
         "title": heading or "データ一覧",
         "headers": headers,
-        "rows": data_rows[:12],
+        "rows": data_rows[:20],
     }
 
 
 def _try_compare(heading: str, lines: list[str], combined: str) -> dict[str, Any] | None:
-    """対比語から compare を生成する。"""
-    if not _COMPARE_KEYWORDS.search(combined):
+    """明示的対比語がある場合のみ compare を生成する。"""
+    if not _COMPARE_STRONG_RE.search(combined):
+        return None
+
+    # 注釈ブロックは content 向け
+    if heading.strip().startswith("（注") or combined.strip().startswith("（注"):
         return None
 
     mid = max(1, len(lines) // 2)
     left_items = lines[:mid][:6]
     right_items = lines[mid:][:6]
-    if not left_items and not right_items:
+    if not left_items or not right_items:
         return None
 
     left_title = "メリット" if "メリット" in combined else "A"
@@ -174,8 +221,8 @@ def _try_compare(heading: str, lines: list[str], combined: str) -> dict[str, Any
         "title": heading or "比較",
         "leftTitle": left_title,
         "rightTitle": right_title,
-        "leftItems": left_items or ["項目なし"],
-        "rightItems": right_items or ["項目なし"],
+        "leftItems": left_items,
+        "rightItems": right_items,
     }
 
 
@@ -186,7 +233,7 @@ def _try_bar_compare(heading: str, lines: list[str], combined: str) -> dict[str,
 
     stats: list[dict[str, str]] = []
     pair_re = re.compile(
-        r"(.+?)[:：]\s*([\d,.\-%％円万件人]+)\s*(?:→|/|vs|VS|対)\s*([\d,.\-%％円万件人]+)",
+        r"(.+?)[:：]\s*([\d,.\-%％円万件人]+)\s*(?:/|vs|VS)\s*([\d,.\-%％円万件人]+)",
     )
     for line in lines:
         m = pair_re.search(line)
@@ -195,17 +242,6 @@ def _try_bar_compare(heading: str, lines: list[str], combined: str) -> dict[str,
                 "label": m.group(1).strip()[:12],
                 "leftValue": m.group(2).strip(),
                 "rightValue": m.group(3).strip(),
-            })
-
-    numeric_lines = [ln for ln in lines if len(_NUMERIC_UNIT_RE.findall(ln)) >= 2]
-    if len(stats) < 2 and len(numeric_lines) >= 2:
-        for i, line in enumerate(numeric_lines[:6]):
-            nums = _NUMERIC_UNIT_RE.findall(line)
-            label = line.split(":")[0].split("：")[0].strip()[:12] or f"項目{i + 1}"
-            stats.append({
-                "label": label,
-                "leftValue": nums[0],
-                "rightValue": nums[1] if len(nums) > 1 else "0",
             })
 
     if len(stats) < 2:
@@ -261,6 +297,72 @@ def _try_kpi(heading: str, lines: list[str], combined: str) -> dict[str, Any] | 
         "title": heading or "主要指標",
         "items": items,
     }
+
+
+def _is_date_only(text: str) -> bool:
+    """文字列が日付のみかどうか。"""
+    if not text:
+        return False
+    return bool(_DATE_LINE_RE.match(text.strip()))
+
+
+def _normalize_date(text: str) -> str | None:
+    """日付文字列を YYYY.MM.DD に正規化する。"""
+    stripped = text.strip()
+    m = _DATE_LINE_RE.match(stripped)
+    if not m:
+        return None
+    if m.group(1):
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        y, mo, d = int(m.group(4)), int(m.group(5)), int(m.group(6))
+    return f"{y:04d}.{mo:02d}.{d:02d}"
+
+
+def _extract_cover_date(blocks: list[str]) -> str | None:
+    """文書先頭付近の日付を表紙 date 用に抽出する。"""
+    for block in blocks[:3]:
+        for line in block.splitlines()[:5]:
+            stripped = line.strip()
+            norm = _normalize_date(stripped)
+            if norm:
+                return norm
+            h = _extract_heading(line)
+            if h:
+                norm = _normalize_date(h)
+                if norm:
+                    return norm
+    return None
+
+
+def _guess_title(blocks: list[str], pdf_stem: str) -> str:
+    """## 見出し（日付以外）を優先してタイトルを推定する。"""
+    for block in blocks:
+        for line in block.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                h = _extract_heading(stripped)
+                if h and not _is_date_only(h):
+                    return h
+
+    for block in blocks:
+        for line in block.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                h = _extract_heading(stripped)
+                if h and not _is_date_only(h):
+                    return h
+
+    for block in blocks:
+        for line in block.splitlines():
+            h = _extract_heading(line)
+            if h and not _is_date_only(h):
+                return h
+            stripped = line.strip()
+            if stripped and not _is_date_only(stripped) and not is_markdown_table_row(stripped):
+                return stripped
+
+    return pdf_stem
 
 
 def _empty_fallback(pdf_stem: str) -> list[dict[str, Any]]:
@@ -347,15 +449,6 @@ def _classify_block(block: str) -> tuple[str, str, list[str]]:
         return "content", heading, body_lines
 
     return "content", heading if len(lines) == 1 else "", body_lines if len(lines) > 1 else lines
-
-
-def _guess_title(blocks: list[str], pdf_stem: str) -> str:
-    """最初のブロックからタイトルを推定する。"""
-    if not blocks:
-        return pdf_stem
-    first_line = blocks[0].splitlines()[0].strip()
-    h = _extract_heading(first_line)
-    return h or first_line or pdf_stem
 
 
 def _clean_bullet(line: str) -> str:

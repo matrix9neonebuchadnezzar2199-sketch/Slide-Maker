@@ -24,7 +24,7 @@ SAMPLE_SLIDES = [
 
 def test_validate_sample_ok() -> None:
     text = json.dumps(SAMPLE_SLIDES, ensure_ascii=False)
-    data, errors = validator.validate_json_text(text)
+    data, errors, warnings = validator.validate_json_text(text)
     assert errors == []
     assert data is not None
     assert len(data) == 5
@@ -36,7 +36,18 @@ def test_validate_forbidden_symbol() -> None:
     assert any("禁止記号" in e for e in errors)
 
 
-def test_build_pptx() -> None:
+def test_huge_table_warning() -> None:
+    """巨大表は警告を返すが検証は通過する。"""
+    huge = [{
+        "type": "table",
+        "title": "大表",
+        "headers": [f"C{i}" for i in range(10)],
+        "rows": [[str(j) for j in range(10)] for _ in range(10)],
+    }]
+    errors = validator.validate_slide_data(huge)
+    assert errors == []
+    warnings = validator.collect_warnings(huge)
+    assert any("大きすぎます" in w for w in warnings)
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "test.pptx"
         renderer.build_pptx(SAMPLE_SLIDES, str(out))

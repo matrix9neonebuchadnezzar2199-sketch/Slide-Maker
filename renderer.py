@@ -547,12 +547,20 @@ def render_table(prs: Presentation, s: dict[str, Any]) -> None:
     if row_h * n_rows > schema.BODY_H:
         row_h = schema.BODY_H // n_rows
 
+    cell_font = (
+        schema.SIZE_CAPTION if n_cols > schema.TABLE_DENSE_COLS else schema.SIZE_BODY_SM
+    )
+
     table_shape = slide.shapes.add_table(
         n_rows, n_cols,
         schema.MARGIN_X, schema.BODY_Y,
         schema.CONTENT_W, table_h,
     )
     table = table_shape.table
+
+    col_w = schema.CONTENT_W // max(n_cols, 1)
+    for ci in range(n_cols):
+        table.columns[ci].width = col_w
 
     for ci, header in enumerate(headers):
         cell = table.cell(0, ci)
@@ -563,7 +571,7 @@ def render_table(prs: Presentation, s: dict[str, Any]) -> None:
             p.alignment = PP_ALIGN.CENTER
             for run in p.runs:
                 schema.set_jp_font(
-                    run, size=schema.SIZE_BODY_SM, color=schema.TEXT_ON_FILL, bold=True,
+                    run, size=cell_font, color=schema.TEXT_ON_FILL, bold=True,
                 )
 
     for ri, row in enumerate(rows):
@@ -577,7 +585,7 @@ def render_table(prs: Presentation, s: dict[str, Any]) -> None:
             for p in cell.text_frame.paragraphs:
                 p.alignment = PP_ALIGN.LEFT
                 for run in p.runs:
-                    schema.set_jp_font(run, size=schema.SIZE_BODY_SM, color=schema.TEXT_MAIN)
+                    schema.set_jp_font(run, size=cell_font, color=schema.TEXT_MAIN)
 
 
 RENDERERS = {

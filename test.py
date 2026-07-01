@@ -21,7 +21,7 @@ from utils import parse_number
 
 def test_user_empty_json_validation_fails() -> None:
     """空 JSON を検証するとエラーになる（UI の検証ボタン相当）。"""
-    _, errors = validator.validate_json_text("")
+    _, errors, _ = validator.validate_json_text("")
     assert any("空" in e for e in errors)
 
 
@@ -87,7 +87,7 @@ def test_user_full_workflow_validate_then_build() -> None:
         {"type": "closing"},
     ]
     text = json.dumps(slides, ensure_ascii=False, indent=2)
-    data, errors = validator.validate_json_text(text)
+    data, errors, warnings = validator.validate_json_text(text)
     assert errors == [], f"validation failed: {errors}"
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -136,6 +136,58 @@ def test_user_business_number_formats() -> None:
     assert parse_number("12.5%") == 12.5
 
 
+# ---------------------------------------------------------------------------
+# シナリオ8: くら寿司型 — Markdown 表が table になり raw 記法が残らない
+# ---------------------------------------------------------------------------
+
+def test_user_markdown_table_to_slide_data() -> None:
+    """Markdown 表入力から table スライドが生成され |---| / <br> が残らない。"""
+    text = """2026年6月18日
+
+## くら寿司5月度月次情報
+
+|指標|5月|前年比|
+|---|---|---|
+|全店売上|100|+5%|
+|客数|50<br>万件|+3%|
+
+（注）問い合わせ先は広報部
+"""
+    slides = rule_mode.build_slide_data(text, pdf_stem="くら寿司月次")
+    json_text = json.dumps(slides, ensure_ascii=False)
+
+    assert "くら寿司5月度月次情報" in json_text
+    assert '"type": "table"' in json_text
+    assert "|---|" not in json_text
+    assert "<br>" not in json_text.lower()
+
+    title_slide = slides[0]
+    assert title_slide["type"] == "title"
+    assert "くら寿司" in title_slide["title"]
+    assert title_slide["title"] != "2026年6月18日"
+
+    table_slides = [s for s in slides if s.get("type") == "table"]
+    assert len(table_slides) >= 1
+    assert table_slides[0]["headers"][0] == "指標"
+
+    compare_slides = [s for s in slides if s.get("type") == "compare"]
+    assert len(compare_slides) == 0
+
+    data, errors, warnings = validator.validate_json_text(json_text)
+    assert errors == []
+
+
+def test_user_title_skips_date_only_content() -> None:
+    """日付のみの行が content スライドのタイトルにならない。"""
+    text = """2026年6月18日
+
+## 月次報告書
+"""
+    slides = rule_mode.build_slide_data(text, pdf_stem="fallback")
+    content_titles = [s["title"] for s in slides if s.get("type") == "content"]
+    assert "2026年6月18日" not in content_titles
+
+
 def run_all() -> int:
     """全シナリオを実行し、失敗数を返す。"""
     tests = [
@@ -146,6 +198,8 @@ def run_all() -> int:
         test_user_selects_llm_mode_gets_stub_error,
         test_user_table_edit_column_mismatch_message,
         test_user_business_number_formats,
+        test_user_markdown_table_to_slide_data,
+        test_user_title_skips_date_only_content,
     ]
     failed = 0
     for fn in tests:

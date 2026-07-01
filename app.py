@@ -192,28 +192,43 @@ class SlideMakerApp:
     def _on_validate(self) -> None:
         """JSON を検証する。"""
         text = self._json_text.get("1.0", tk.END)
-        data, errors = validator.validate_json_text(text)
+        data, errors, warnings = validator.validate_json_text(text)
         if errors:
             messagebox.showwarning(
                 "検証失敗",
                 "以下の問題が見つかりました:\n\n" + "\n".join(errors),
             )
             self._status.set(f"検証失敗 ({len(errors)} 件)")
+            return
+
+        slide_count = len(data) if data else 0
+        msg = f"スキーマ検証に合格しました。\nスライド数: {slide_count}"
+        if warnings:
+            msg += "\n\n【注意】\n" + "\n".join(warnings)
+            messagebox.showwarning("検証成功（注意あり）", msg)
+            self._status.set(f"検証成功（警告 {len(warnings)} 件）")
         else:
-            slide_count = len(data) if data else 0
-            messagebox.showinfo("検証成功", f"スキーマ検証に合格しました。\nスライド数: {slide_count}")
+            messagebox.showinfo("検証成功", msg)
             self._status.set("検証成功")
 
     def _on_build_pptx(self) -> None:
         """PPTX を生成する。"""
         text = self._json_text.get("1.0", tk.END)
-        data, errors = validator.validate_json_text(text)
+        data, errors, warnings = validator.validate_json_text(text)
         if errors:
             messagebox.showerror(
                 "検証エラー",
                 "スライド作成前の検証に失敗しました:\n\n" + "\n".join(errors[:10]),
             )
             return
+
+        if warnings:
+            proceed = messagebox.askyesno(
+                "注意",
+                "以下の警告があります。続行しますか？\n\n" + "\n".join(warnings),
+            )
+            if not proceed:
+                return
 
         out_dir = self._output_dir.get().strip()
         if not out_dir:

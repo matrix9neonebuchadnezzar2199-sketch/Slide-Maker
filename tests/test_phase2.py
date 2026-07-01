@@ -47,7 +47,7 @@ PHASE2_SAMPLE = [
 
 def test_phase2_validate_ok() -> None:
     text = json.dumps(PHASE2_SAMPLE, ensure_ascii=False)
-    data, errors = validator.validate_json_text(text)
+    data, errors, warnings = validator.validate_json_text(text)
     assert errors == []
     assert data is not None
 

@@ -11,28 +11,32 @@ import schema
 _LEADING_NUMBER_RE = re.compile(schema.LEADING_NUMBER_PATTERN, re.IGNORECASE)
 
 
-def validate_json_text(text: str) -> tuple[list[dict[str, Any]] | None, list[str]]:
+def validate_json_text(
+    text: str,
+) -> tuple[list[dict[str, Any]] | None, list[str], list[str]]:
     """JSON テキストをパースし、スキーマ検証する。
 
     Args:
         text: UI 上の JSON 文字列。
 
     Returns:
-        (data, errors) — 成功時 errors は空リスト。失敗時 data は None。
+        (data, errors, warnings) — 成功時 errors は空。warnings は非致命の注意。
     """
     stripped = text.strip()
     if not stripped:
-        return None, ["JSON が空です。"]
+        return None, ["JSON が空です。"], []
 
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        return None, [f"JSON 構文エラー: {exc.msg} (行 {exc.lineno}, 列 {exc.colno})"]
+        return None, [f"JSON 構文エラー: {exc.msg} (行 {exc.lineno}, 列 {exc.colno})"], []
 
     errors = validate_slide_data(parsed)
     if errors:
-        return None, errors
-    return parsed, []
+        return None, errors, []
+
+    warnings = collect_warnings(parsed)
+    return parsed, [], warnings
 
 
 def validate_slide_data(data: Any, *, strict_types: bool = True) -> list[str]:
@@ -100,6 +104,29 @@ def _validate_slide(slide: Any, prefix: str, *, strict_types: bool) -> list[str]
                     )
 
     return errors
+
+
+def collect_warnings(data: Any) -> list[str]:
+    """非致命の警告メッセージを収集する（巨大表など）。"""
+    warnings: list[str] = []
+
+    if not isinstance(data, list):
+        return warnings
+
+    for idx, slide in enumerate(data, start=1):
+        if not isinstance(slide, dict) or slide.get("type") != "table":
+            continue
+        headers = slide.get("headers") or []
+        rows = slide.get("rows") or []
+        n_cols = len(headers) if isinstance(headers, list) else 0
+        n_rows = len(rows) if isinstance(rows, list) else 0
+        if n_cols > schema.TABLE_WARN_COLS or n_cols * n_rows > schema.TABLE_WARN_CELLS:
+            warnings.append(
+                f"スライド {idx}: この表は大きすぎます（{n_cols}列×{n_rows}行）。"
+                "LLMモードでのグラフ化、または手動分割を推奨します。"
+            )
+
+    return warnings
 
 
 def _validate_type_specific(slide: dict[str, Any], prefix: str, slide_type: str) -> list[str]:
