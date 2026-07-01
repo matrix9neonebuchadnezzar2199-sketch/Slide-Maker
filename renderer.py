@@ -13,6 +13,7 @@ from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Pt
 
 import schema
+import utils
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ def _add_slide(prs: Presentation):
     return prs.slides.add_slide(_blank_layout(prs))
 
 
-def _draw_title_header(slide, s: dict[str, Any]) -> None:
+def _draw_header(slide, s: dict[str, Any]) -> None:
     """共通タイトル帯（左アクセントバー + タイトル + subhead）を描画する。"""
     # 左縦アクセントバー
     bar = slide.shapes.add_shape(
@@ -160,6 +161,9 @@ def _draw_title_header(slide, s: dict[str, Any]) -> None:
             font_size=schema.SIZE_SUBHEAD,
             color=schema.TEXT_SUB,
         )
+
+
+_draw_title_header = _draw_header  # 後方互換
 
 
 def render_title(prs: Presentation, s: dict[str, Any]) -> None:
@@ -241,7 +245,7 @@ def render_section(prs: Presentation, s: dict[str, Any]) -> None:
 def render_content(prs: Presentation, s: dict[str, Any]) -> None:
     """箇条書き本文スライドを描画する。"""
     slide = _add_slide(prs)
-    _draw_title_header(slide, s)
+    _draw_header(slide, s)
 
     gap = schema.CARD_GAP
     if s.get("twoColumn") and s.get("columns"):
@@ -272,7 +276,7 @@ def _draw_bullet_list(slide, left: Emu, top: Emu, width: Emu, items: list[str]) 
 def render_agenda(prs: Presentation, s: dict[str, Any]) -> None:
     """アジェンダスライドを描画する。"""
     slide = _add_slide(prs)
-    _draw_title_header(slide, s)
+    _draw_header(slide, s)
 
     items = s.get("items") or []
     for i, item in enumerate(items):
@@ -311,12 +315,281 @@ def render_closing(prs: Presentation, s: dict[str, Any]) -> None:
     )
 
 
+def _fill_solid_border(shape, fill: RGBColor, border: RGBColor = schema.BORDER) -> None:
+    """図形を単色塗り＋枠線にする。"""
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = fill
+    shape.line.color.rgb = border
+    shape.line.width = Pt(0.75)
+
+
+def _add_rounded_card(slide, left, top, width, height):
+    """角丸カード図形を追加する。"""
+    card = slide.shapes.add_shape(
+        MSO_SHAPE.ROUNDED_RECTANGLE,
+        left, top, width, height,
+    )
+    _fill_solid_border(card, schema.BG_LIGHT)
+    return card
+
+
+def render_kpi(prs: Presentation, s: dict[str, Any]) -> None:
+    """KPI カードスライドを描画する。"""
+    slide = _add_slide(prs)
+    _draw_header(slide, s)
+
+    items = (s.get("items") or [])[: schema.MAX_COUNT["kpi"]]
+    if not items:
+        return
+
+    cols = s.get("columns")
+    if cols is None:
+        cols = len(items)
+    cols = max(1, min(int(cols), len(items), schema.MAX_COUNT["kpi"]))
+
+    gap = schema.CARD_GAP
+    card_w = (schema.CONTENT_W - gap * (cols - 1)) // cols
+    card_h = schema.KPI_CARD_H
+    area_h = schema.BODY_H
+    card_y = schema.BODY_Y + max(0, (area_h - card_h) // 2)
+
+    for i, item in enumerate(items[:cols]):
+        x = schema.MARGIN_X + i * (card_w + gap)
+        card = _add_rounded_card(slide, x, card_y, card_w, card_h)
+
+        status = item.get("status", "neutral")
+        status_color = schema.STATUS_COLORS.get(status, schema.STATUS_NEUTRAL)
+
+        bar = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, x, card_y, card_w, schema.KPI_STATUS_BAR_H,
+        )
+        _fill_solid(bar, status_color)
+
+        pad = Emu(150000)
+        inner_y = card_y + schema.KPI_STATUS_BAR_H + pad
+        label = str(item.get("label", ""))[:14]
+        value = str(item.get("value", ""))
+        change = str(item.get("change", ""))[:10]
+
+        _add_textbox(
+            slide, x + pad, inner_y, card_w - pad * 2, Emu(400000),
+            label, font_size=schema.SIZE_KPI_LABEL, color=schema.TEXT_SUB,
+        )
+        _add_textbox(
+            slide, x + pad, inner_y + Emu(450000), card_w - pad * 2, Emu(800000),
+            value, font_size=schema.SIZE_KPI_VALUE, bold=True, color=schema.PRIMARY,
+        )
+        _add_textbox(
+            slide, x + pad, inner_y + Emu(1300000), card_w - pad * 2, Emu(350000),
+            change, font_size=schema.SIZE_CAPTION, color=status_color,
+        )
+
+
+def render_barCompare(prs: Presentation, s: dict[str, Any]) -> None:
+    """棒グラフ比較スライドを描画する。"""
+    slide = _add_slide(prs)
+    _draw_header(slide, s)
+
+    stats = (s.get("stats") or [])[: schema.BAR_COMPARE_MAX_ROWS]
+    if not stats:
+        return
+
+    show_trends = bool(s.get("showTrends", False))
+    label_w = int(schema.CONTENT_W * 22 // 100)
+    bar_x = schema.MARGIN_X + label_w + Emu(100000)
+    bar_w = schema.CONTENT_W - label_w - Emu(200000)
+    row_h = schema.BODY_H // max(len(stats), 1)
+
+    all_vals = []
+    for stat in stats:
+        all_vals.append(utils.parse_number(str(stat.get("leftValue", ""))))
+        all_vals.append(utils.parse_number(str(stat.get("rightValue", ""))))
+    max_val = max(all_vals) if all_vals else 1.0
+    if max_val <= 0:
+        max_val = 1.0
+
+    # 凡例（右上）
+    legend_y = schema.BODY_Y - Emu(200000)
+    _add_textbox(
+        slide, schema.MARGIN_X + schema.CONTENT_W - Emu(2800000), legend_y,
+        Emu(1200000), Emu(200000), "A", font_size=schema.SIZE_CAPTION, color=schema.PRIMARY,
+    )
+    leg_a = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        schema.MARGIN_X + schema.CONTENT_W - Emu(3000000), legend_y + Emu(50000),
+        Emu(150000), Emu(100000),
+    )
+    _fill_solid(leg_a, schema.PRIMARY)
+    _add_textbox(
+        slide, schema.MARGIN_X + schema.CONTENT_W - Emu(1400000), legend_y,
+        Emu(1200000), Emu(200000), "B", font_size=schema.SIZE_CAPTION, color=schema.ACCENT,
+    )
+    leg_b = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        schema.MARGIN_X + schema.CONTENT_W - Emu(1600000), legend_y + Emu(50000),
+        Emu(150000), Emu(100000),
+    )
+    _fill_solid(leg_b, schema.ACCENT)
+
+    thin = Emu(180000)
+    gap_in_row = Emu(80000)
+
+    for i, stat in enumerate(stats):
+        row_y = schema.BODY_Y + i * row_h
+        label = str(stat.get("label", ""))[:12]
+        _add_textbox(
+            slide, schema.MARGIN_X, row_y, label_w, row_h,
+            label, font_size=schema.SIZE_BODY_SM, color=schema.TEXT_MAIN,
+            align=PP_ALIGN.RIGHT,
+        )
+
+        left_val = utils.parse_number(str(stat.get("leftValue", "")))
+        right_val = utils.parse_number(str(stat.get("rightValue", "")))
+        left_len = int(bar_w * left_val / max_val) if max_val else 0
+        right_len = int(bar_w * right_val / max_val) if max_val else 0
+
+        bar1_y = row_y + Emu(80000)
+        bar2_y = bar1_y + thin + gap_in_row
+
+        if left_len > 0:
+            b1 = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, bar_x, bar1_y, left_len, thin)
+            _fill_solid(b1, schema.PRIMARY)
+            _add_textbox(
+                slide, bar_x + left_len + Emu(50000), bar1_y, Emu(800000), thin,
+                str(stat.get("leftValue", "")), font_size=schema.SIZE_CAPTION,
+            )
+
+        if right_len > 0:
+            b2 = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, bar_x, bar2_y, right_len, thin)
+            _fill_solid(b2, schema.ACCENT)
+            _add_textbox(
+                slide, bar_x + right_len + Emu(50000), bar2_y, Emu(800000), thin,
+                str(stat.get("rightValue", "")), font_size=schema.SIZE_CAPTION,
+            )
+
+        if show_trends:
+            trend = stat.get("trend")
+            tri_x = schema.MARGIN_X + schema.CONTENT_W - Emu(250000)
+            tri_y = row_y + row_h // 2 - Emu(80000)
+            if trend == "up":
+                tri = slide.shapes.add_shape(
+                    MSO_SHAPE.ISOSCELES_TRIANGLE, tri_x, tri_y, Emu(160000), Emu(160000),
+                )
+                _fill_solid(tri, schema.STATUS_GOOD)
+            elif trend == "down":
+                tri = slide.shapes.add_shape(
+                    MSO_SHAPE.ISOSCELES_TRIANGLE, tri_x, tri_y, Emu(160000), Emu(160000),
+                )
+                tri.rotation = 180.0
+                _fill_solid(tri, schema.STATUS_BAD)
+
+
+def render_compare(prs: Presentation, s: dict[str, Any]) -> None:
+    """対比2カラムスライドを描画する。"""
+    slide = _add_slide(prs)
+    _draw_header(slide, s)
+
+    gap = schema.CARD_GAP
+    col_w = (schema.CONTENT_W - gap) // 2
+    left_items = (s.get("leftItems") or [])[: schema.COMPARE_MAX_ITEMS]
+    right_items = (s.get("rightItems") or [])[: schema.COMPARE_MAX_ITEMS]
+
+    columns = [
+        (schema.MARGIN_X, s.get("leftTitle", ""), schema.PRIMARY, left_items),
+        (schema.MARGIN_X + col_w + gap, s.get("rightTitle", ""), schema.PRIMARY_LT, right_items),
+    ]
+
+    header_h = schema.COMPARE_HEADER_H
+    body_top = schema.BODY_Y + header_h + gap
+    body_h = schema.BODY_H - header_h - gap
+
+    for col_x, col_title, header_color, items in columns:
+        header = slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE, col_x, schema.BODY_Y, col_w, header_h,
+        )
+        _fill_solid(header, header_color)
+        _add_textbox(
+            slide, col_x, schema.BODY_Y, col_w, header_h,
+            str(col_title), font_size=schema.SIZE_BODY, bold=True,
+            color=schema.TEXT_ON_FILL, align=PP_ALIGN.CENTER,
+        )
+
+        body_card = _add_rounded_card(slide, col_x, body_top, col_w, body_h)
+        line_h = Emu(500000)
+        for i, item in enumerate(items):
+            y = body_top + Emu(100000) + i * line_h
+            oval = slide.shapes.add_shape(
+                MSO_SHAPE.OVAL,
+                col_x + Emu(120000), y + Emu(80000),
+                schema.COMPARE_BULLET_OVAL, schema.COMPARE_BULLET_OVAL,
+            )
+            _fill_solid(oval, schema.ACCENT)
+            _add_textbox(
+                slide, col_x + Emu(250000), y, col_w - Emu(350000), line_h,
+                str(item), font_size=schema.SIZE_BODY_SM, color=schema.TEXT_MAIN,
+            )
+
+
+def render_table(prs: Presentation, s: dict[str, Any]) -> None:
+    """表スライドを描画する。"""
+    slide = _add_slide(prs)
+    _draw_header(slide, s)
+
+    headers = s.get("headers") or []
+    rows = s.get("rows") or []
+    if not headers:
+        return
+
+    n_cols = len(headers)
+    n_rows = len(rows) + 1
+    row_h = schema.TABLE_ROW_H
+    table_h = min(row_h * n_rows, schema.BODY_H)
+    if row_h * n_rows > schema.BODY_H:
+        row_h = schema.BODY_H // n_rows
+
+    table_shape = slide.shapes.add_table(
+        n_rows, n_cols,
+        schema.MARGIN_X, schema.BODY_Y,
+        schema.CONTENT_W, table_h,
+    )
+    table = table_shape.table
+
+    for ci, header in enumerate(headers):
+        cell = table.cell(0, ci)
+        cell.text = str(header)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = schema.PRIMARY
+        for p in cell.text_frame.paragraphs:
+            p.alignment = PP_ALIGN.CENTER
+            for run in p.runs:
+                schema.set_jp_font(
+                    run, size=schema.SIZE_BODY_SM, color=schema.TEXT_ON_FILL, bold=True,
+                )
+
+    for ri, row in enumerate(rows):
+        for ci in range(n_cols):
+            cell = table.cell(ri + 1, ci)
+            text = str(row[ci]) if ci < len(row) else ""
+            cell.text = text
+            bg = schema.BG_WHITE if ri % 2 == 0 else schema.BG_LIGHT
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = bg
+            for p in cell.text_frame.paragraphs:
+                p.alignment = PP_ALIGN.LEFT
+                for run in p.runs:
+                    schema.set_jp_font(run, size=schema.SIZE_BODY_SM, color=schema.TEXT_MAIN)
+
+
 RENDERERS = {
     "title": render_title,
     "section": render_section,
     "content": render_content,
     "agenda": render_agenda,
     "closing": render_closing,
+    "kpi": render_kpi,
+    "barCompare": render_barCompare,
+    "compare": render_compare,
+    "table": render_table,
 }
 
 

@@ -42,4 +42,9 @@ python -m venv .venv
 | `schema.py` | スキーマ・デザイン定数 |
 | `SPEC.md` | 設計仕様書 |
 
-詳細は [SPEC.md](SPEC.md) を参照。
+## テスト
+
+```powershell
+python test.py              # ユーザー行動予測テスト（7シナリオ）
+.\.venv\Scripts\python -m pytest tests\ -v
+```

@@ -108,6 +108,15 @@ CLOSING_TEXT_Y = Emu(2800000)
 BULLET_LINE_H = Emu(550000)
 AGENDA_LINE_H = Emu(650000)
 
+# 第2弾レイアウト
+KPI_CARD_H = Emu(2743200)
+KPI_STATUS_BAR_H = Emu(68580)
+COMPARE_HEADER_H = Emu(548640)
+COMPARE_BULLET_OVAL = Emu(45720)
+TABLE_ROW_H = Emu(365760)
+BAR_COMPARE_MAX_ROWS = 6
+COMPARE_MAX_ITEMS = 6
+
 
 def set_jp_font(
     run,
@@ -128,7 +137,12 @@ def set_jp_font(
     if color is not None:
         run.font.color.rgb = color
 
-    r_pr = run._element.get_or_add_rPr()
+    r_el = getattr(run, "_r", None)
+    if r_el is None:
+        r_el = getattr(run, "_element", None)
+    if r_el is None:
+        return
+    r_pr = r_el.get_or_add_rPr()
     ea = r_pr.find(qn("a:ea"))
     if ea is None:
         ea = r_pr.makeelement(qn("a:ea"), {})
@@ -154,6 +168,11 @@ def gradient_steps_for_levels(level_count: int) -> list[RGBColor]:
 # ============================================================
 
 PHASE1_TYPES = frozenset({"title", "section", "content", "agenda", "closing"})
+
+PHASE2_TYPES = frozenset({"kpi", "barCompare", "compare", "table"})
+
+# 現時点で validator / UI が許可する type（第1+2弾）
+IMPLEMENTED_TYPES = PHASE1_TYPES | PHASE2_TYPES
 
 ALL_TYPES = PHASE1_TYPES | frozenset({
     "kpi", "barCompare", "compare", "table",

@@ -77,7 +77,7 @@ def _validate_slide(slide: Any, prefix: str, *, strict_types: bool) -> list[str]
         errors.append(f"{prefix}: `type` は文字列である必要があります。")
         return errors
 
-    known = schema.PHASE1_TYPES if strict_types else schema.ALL_TYPES
+    known = schema.IMPLEMENTED_TYPES if strict_types else schema.ALL_TYPES
     if slide_type not in known:
         errors.append(f"{prefix}: 未知の type `{slide_type}` です。")
         return errors
@@ -136,8 +136,52 @@ def _validate_type_specific(slide: dict[str, Any], prefix: str, slide_type: str)
 
     if slide_type == "kpi":
         items = slide.get("items")
-        if isinstance(items, list) and len(items) > schema.MAX_COUNT["kpi"]:
-            errors.append(f"{prefix}: `kpi` の `items` は最大 {schema.MAX_COUNT['kpi']} 件です。")
+        if isinstance(items, list):
+            if len(items) > schema.MAX_COUNT["kpi"]:
+                errors.append(f"{prefix}: `kpi` の `items` は最大 {schema.MAX_COUNT['kpi']} 件です。")
+            for ii, item in enumerate(items, start=1):
+                if not isinstance(item, dict):
+                    errors.append(f"{prefix}: `items[{ii - 1}]` はオブジェクトである必要があります。")
+                    continue
+                for key in ("label", "value", "change", "status"):
+                    if key not in item:
+                        errors.append(f"{prefix}: `items[{ii - 1}]` に `{key}` が必須です。")
+                status = item.get("status")
+                if status is not None and status not in schema.STATUS_COLORS:
+                    errors.append(
+                        f"{prefix}: `items[{ii - 1}].status` は good/bad/neutral のいずれかです。"
+                    )
+
+    if slide_type == "barCompare":
+        stats = slide.get("stats")
+        if isinstance(stats, list):
+            for si, stat in enumerate(stats, start=1):
+                if not isinstance(stat, dict):
+                    errors.append(f"{prefix}: `stats[{si - 1}]` はオブジェクトである必要があります。")
+                    continue
+                for key in ("label", "leftValue", "rightValue"):
+                    if key not in stat:
+                        errors.append(f"{prefix}: `stats[{si - 1}]` に `{key}` が必須です。")
+
+    if slide_type == "compare":
+        for key in ("leftItems", "rightItems"):
+            arr = slide.get(key)
+            if arr is not None and not isinstance(arr, list):
+                errors.append(f"{prefix}: `{key}` は文字列配列である必要があります。")
+
+    if slide_type == "table":
+        headers = slide.get("headers")
+        rows = slide.get("rows")
+        if isinstance(headers, list) and isinstance(rows, list):
+            n_cols = len(headers)
+            for ri, row in enumerate(rows, start=1):
+                if not isinstance(row, list):
+                    errors.append(f"{prefix}: {ri} 番目の行は配列である必要があります。")
+                    continue
+                if len(row) != n_cols:
+                    errors.append(
+                        f"{prefix}: {ri} 番目の行の列数がヘッダー（{n_cols}列）と不一致です（{len(row)}列）。"
+                    )
 
     if slide_type == "process":
         steps = slide.get("steps")
