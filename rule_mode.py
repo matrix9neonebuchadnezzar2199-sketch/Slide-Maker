@@ -9,10 +9,20 @@ from typing import Any
 from table_parser import detect_markdown_tables, is_markdown_table_row
 from utils import parse_number
 
-# 見出しパターン（Markdown / 日本語文書向け）
+# 見出しパターン（Markdown / 日本語文書向け）— H1〜H6
 _H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _H2_RE = re.compile(r"^##\s+(.+)$", re.MULTILINE)
 _H3_RE = re.compile(r"^###\s+(.+)$", re.MULTILINE)
+_H4_RE = re.compile(r"^####\s+(.+)$", re.MULTILINE)
+_H5_RE = re.compile(r"^#####\s+(.+)$", re.MULTILINE)
+_H6_RE = re.compile(r"^######\s+(.+)$", re.MULTILINE)
+_HEADING_MARKERS_RE = re.compile(r"^#{1,6}\s+")
+_HTML_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HEADING_PATTERNS: tuple[tuple[int, re.Pattern[str]], ...] = (
+    (1, _H1_RE), (2, _H2_RE), (3, _H3_RE),
+    (4, _H4_RE), (5, _H5_RE), (6, _H6_RE),
+)
 _BULLET_RE = re.compile(r"^[\-\*•・]\s+(.+)$", re.MULTILINE)
 _NUMBERED_RE = re.compile(r"^\d+[\.\)、．]\s*(.+)$", re.MULTILINE)
 _TAB_ROW_RE = re.compile(r"\t")
@@ -38,8 +48,38 @@ _NUMERIC_UNIT_RE = re.compile(
 )
 _BAR_COMPARE_RE = re.compile(r"前年比|前月比|昨年対|目標対|実績対|予算対")
 
+# 表紙候補から除外する括弧のみ・日付風文字列
+_PAREN_ONLY_RE = re.compile(r"^（.+）$")
 
-def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション") -> list[dict[str, Any]]:
+# kpi ラベル妥当性
+_KPI_LABEL_MAX_LEN = 20
+_KPI_LINE_MAX_LEN = 40
+_MID_SENTENCE_END_RE = re.compile(r"[、。，．でがはをにのへ]$")
+_MID_SENTENCE_START_RE = re.compile(r"^(政府|当|本|その|これ|また|さらに|景気|物価)")
+
+# 表セル由来の疑似見出し（表紙候補から除外）
+_SPURIOUS_HEADING_RE = re.compile(
+    r"^(\d{1,2}Q|Q\d|年度|\d{1,2}月|上半期|下半期|通期)$"
+    r"|^年度\b"
+    r"|^[\d\s月Qq]+$",
+    re.IGNORECASE,
+)
+_STEM_DATE_SUFFIX_RE = re.compile(
+    r"[_\-\s]?(?:\d{4}[\-_]?\d{2}[\-_]?\d{2}|\d{8}|v\d+)$",
+    re.IGNORECASE,
+)
+_GENERIC_STEM_NAMES = frozenset({
+    "fallback", "document", "output", "untitled", "presentation",
+    "プレゼンテーション", "slide", "slides", "temp", "test",
+})
+
+
+def build_slide_data(
+    text: str,
+    *,
+    pdf_stem: str = "プレゼンテーション",
+    cover_title: str | None = None,
+) -> list[dict[str, Any]]:
     """抽出テキストからルールベースで slideData を生成する。"""
     if not text or not text.strip():
         return _empty_fallback(pdf_stem)
@@ -50,11 +90,11 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
     agenda_items: list[str] = []
     pending_agenda = False
 
-    cover_title = _find_cover_title(text, pdf_stem)
+    resolved_cover = _resolve_cover_title(text, pdf_stem, cover_title)
     cover_date = _extract_cover_date(blocks) or date.today().strftime("%Y.%m.%d")
     slides.append({
         "type": "title",
-        "title": cover_title,
+        "title": resolved_cover,
         "date": cover_date,
     })
 
@@ -77,7 +117,7 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
                 "title": heading,
                 "sectionNo": section_counter,
             })
-            slides.extend(_slides_from_body(heading, body_lines, cover_title=cover_title))
+            slides.extend(_slides_from_body(heading, body_lines, cover_title=resolved_cover))
             continue
 
         if block_type == "closing":
@@ -88,7 +128,7 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
         if _is_date_only(heading) and not body_lines:
             continue
 
-        slides.extend(_slides_from_body(heading, body_lines, cover_title=cover_title))
+        slides.extend(_slides_from_body(heading, body_lines, cover_title=resolved_cover))
 
     if agenda_items:
         slides.insert(1, {
@@ -100,7 +140,7 @@ def build_slide_data(text: str, *, pdf_stem: str = "プレゼンテーション"
     if not any(s.get("type") == "closing" for s in slides):
         slides.append({"type": "closing"})
 
-    return slides
+    return [_sanitize_slide(slide) for slide in slides]
 
 
 def _slides_from_body(
@@ -265,9 +305,15 @@ def _try_bar_compare(heading: str, lines: list[str], combined: str) -> dict[str,
 
 
 def _try_kpi(heading: str, lines: list[str], combined: str) -> dict[str, Any] | None:
-    """KPI 的数値列から kpi を生成する。"""
+    """KPI 的数値列から kpi を生成する（文章主体文書での暴発を抑制）。"""
     kpi_lines = [ln for ln in lines if _KPI_KEYWORDS.search(ln) or _NUMERIC_UNIT_RE.search(ln)]
     if len(kpi_lines) < 3:
+        return None
+
+    # 長い段落に埋まった % は kpi にしない
+    if any(len(ln) > _KPI_LINE_MAX_LEN for ln in kpi_lines):
+        return None
+    if not _lines_look_structured_kpi(kpi_lines):
         return None
 
     items: list[dict[str, str]] = []
@@ -284,6 +330,9 @@ def _try_kpi(heading: str, lines: list[str], combined: str) -> dict[str, Any] | 
             if nums:
                 value = nums[0]
                 label = line.replace(nums[0], "").strip(" ：:()（）") or label
+
+        if not _is_valid_kpi_label(label):
+            return None
 
         status = "neutral"
         if parse_number(value) > 0 and ("+" in value or "増" in line):
@@ -306,6 +355,28 @@ def _try_kpi(heading: str, lines: list[str], combined: str) -> dict[str, Any] | 
         "title": heading or "主要指標",
         "items": items,
     }
+
+
+def _is_valid_kpi_label(label: str) -> bool:
+    """kpi ラベルとして妥当か（迷ったら False）。"""
+    if not label or len(label) > _KPI_LABEL_MAX_LEN:
+        return False
+    if _MID_SENTENCE_END_RE.search(label):
+        return False
+    if _MID_SENTENCE_START_RE.search(label):
+        return False
+    return True
+
+
+def _lines_look_structured_kpi(lines: list[str]) -> bool:
+    """短い指標名＋値が規則的に並ぶ構造かどうか。"""
+    structured = 0
+    for line in lines:
+        if re.match(r"^.+?[:：]\s*.+", line):
+            structured += 1
+        elif _KPI_KEYWORDS.search(line) and len(line) <= 30:
+            structured += 1
+    return structured >= 3
 
 
 def _is_date_only(text: str) -> bool:
@@ -344,21 +415,104 @@ def _extract_cover_date(blocks: list[str]) -> str | None:
     return None
 
 
+def _is_spurious_table_heading(text: str) -> bool:
+    """表セル由来の短い見出し（1Q / 2月 / 年度 等）かどうか。"""
+    t = text.strip()
+    if len(t) <= 3:
+        return True
+    if _SPURIOUS_HEADING_RE.match(t):
+        return True
+    # 「年度 11月 12月 1月」のような月名羅列
+    if t.startswith("年度") and "月" in t:
+        return True
+    return False
+
+
+def _lines_outside_tables(lines: list[str]) -> list[str]:
+    """Markdown 表ブロック内の行を除いた行リストを返す。"""
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        if is_markdown_table_row(lines[i]):
+            while i < len(lines) and is_markdown_table_row(lines[i]):
+                i += 1
+            continue
+        result.append(lines[i])
+        i += 1
+    return result
+
+
+def _lines_before_first_table(lines: list[str]) -> list[str]:
+    """最初の Markdown 表より前の行だけを返す。"""
+    before: list[str] = []
+    for line in lines:
+        if is_markdown_table_row(line):
+            break
+        before.append(line)
+    return before
+
+
 def _is_valid_cover_title(text: str) -> bool:
     """表紙タイトル候補として妥当かどうか。"""
     if not text or not text.strip():
         return False
-    if _is_date_only(text):
+    stripped = text.strip()
+    if _is_date_only(stripped):
         return False
-    if is_markdown_table_row(text) or text.strip().startswith("|"):
+    if _PAREN_ONLY_RE.match(stripped):
+        return False
+    if is_markdown_table_row(stripped) or stripped.startswith("|"):
+        return False
+    if _is_spurious_table_heading(stripped):
         return False
     return True
+
+
+def _clean_pdf_stem_for_title(stem: str) -> str:
+    """PDF ファイル名から表紙タイトル候補を得る。"""
+    name = stem.strip()
+    while True:
+        cleaned = _STEM_DATE_SUFFIX_RE.sub("", name).strip(" _-")
+        if cleaned == name or not cleaned:
+            break
+        name = cleaned
+    return name or stem
+
+
+def _stem_usable_as_cover(stem: str) -> bool:
+    """ファイル名を表紙タイトルのフォールバックに使えるか。"""
+    candidate = _clean_pdf_stem_for_title(stem)
+    if not candidate:
+        return False
+    if candidate.lower() in _GENERIC_STEM_NAMES:
+        return False
+    return _is_valid_cover_title(candidate)
+
+
+def _resolve_cover_title(
+    text: str,
+    pdf_stem: str,
+    user_title: str | None,
+) -> str:
+    """表紙タイトルを決定する（人間入力 > ファイル名 > 本文推測）。"""
+    if user_title and user_title.strip():
+        return user_title.strip()
+
+    stem_candidate = _clean_pdf_stem_for_title(pdf_stem)
+    if _stem_usable_as_cover(pdf_stem):
+        return stem_candidate
+
+    found = _find_cover_title(text, pdf_stem)
+    if found and _is_valid_cover_title(found):
+        return found
+
+    return stem_candidate or pdf_stem
 
 
 def _parse_heading_level(line: str) -> tuple[int, str] | None:
     """見出し行のレベルとタイトル文字列を返す。"""
     stripped = line.strip()
-    for level, pattern in ((1, _H1_RE), (2, _H2_RE), (3, _H3_RE)):
+    for level, pattern in _HEADING_PATTERNS:
         m = pattern.match(stripped)
         if m:
             return level, m.group(1).strip()
@@ -366,13 +520,36 @@ def _parse_heading_level(line: str) -> tuple[int, str] | None:
 
 
 def _find_cover_title(text: str, pdf_stem: str) -> str:
-    """文書先頭から走査し、最初の有効 H2 を表紙タイトルに確定する。
+    """表紙タイトルを選定する。
 
-    見つかった時点で即 return（後続の見出しは見ない）。
-    H2 が無い場合は、最初の表より前にある最初の見出しを fallback とする。
-    """
-    # 優先1: 最初の H2（日付・表行以外）
-    for line in text.splitlines():
+    決算PDFでは表セルが ``## 1Q`` 等の H2 として誤抽出されるため、
+    1. 最初の表より前の見出し / プレーンテキストを最優先
+    2. 表ブロック外の行から最初の有効 H2
+    3. 短い四半期・月名見出しは除外
+  """
+    lines = text.splitlines()
+
+    # フェーズ1: 最初の Markdown 表より前（文書タイトルは通常ここにある）
+    for line in _lines_before_first_table(lines):
+        parsed = _parse_heading_level(line)
+        if parsed is not None:
+            _, title = parsed
+            if _is_valid_cover_title(title):
+                return title
+        stripped = line.strip()
+        if (
+            stripped
+            and not _is_date_only(stripped)
+            and _parse_heading_level(line) is None
+            and not is_markdown_table_row(stripped)
+            and len(stripped) >= 4
+            and not _is_spurious_table_heading(stripped)
+            and not _PAREN_ONLY_RE.match(stripped)
+        ):
+            return stripped
+
+    # フェーズ2: 表ブロック外の行から最初の有効 H2
+    for line in _lines_outside_tables(lines):
         parsed = _parse_heading_level(line)
         if parsed is None:
             continue
@@ -380,24 +557,13 @@ def _find_cover_title(text: str, pdf_stem: str) -> str:
         if level == 2 and _is_valid_cover_title(title):
             return title
 
-    # 優先2: 最初の H1
-    for line in text.splitlines():
+    # フェーズ3: 表ブロック外の最初の有効 H1
+    for line in _lines_outside_tables(lines):
         parsed = _parse_heading_level(line)
         if parsed is None:
             continue
         level, title = parsed
         if level == 1 and _is_valid_cover_title(title):
-            return title
-
-    # 優先3: 最初の Markdown 表より前にある最初の見出し（### 含む）
-    for line in text.splitlines():
-        if is_markdown_table_row(line):
-            break
-        parsed = _parse_heading_level(line)
-        if parsed is None:
-            continue
-        _, title = parsed
-        if _is_valid_cover_title(title):
             return title
 
     return pdf_stem
@@ -451,18 +617,15 @@ def _split_blocks(text: str) -> list[str]:
 
 def _is_heading(line: str) -> bool:
     """行が見出しかどうか。"""
-    stripped = line.strip()
-    return bool(_H1_RE.match(stripped) or _H2_RE.match(stripped) or _H3_RE.match(stripped))
+    return _parse_heading_level(line) is not None
 
 
 def _extract_heading(line: str) -> str | None:
     """見出し行からタイトル文字列を取り出す。"""
-    stripped = line.strip()
-    for pattern in (_H1_RE, _H2_RE, _H3_RE):
-        m = pattern.match(stripped)
-        if m:
-            return m.group(1).strip()
-    return None
+    parsed = _parse_heading_level(line)
+    if parsed is None:
+        return None
+    return _clean_inline_text(parsed[1])
 
 
 def _classify_block(block: str) -> tuple[str, str, list[str]]:
@@ -495,8 +658,9 @@ def _classify_block(block: str) -> tuple[str, str, list[str]]:
 
 
 def _clean_bullet(line: str) -> str:
-    """箇条書き記号・末尾句点を除去する。"""
-    stripped = line.strip()
+    """箇条書き記号・見出し記号・HTMLタグ・末尾句点を除去する。"""
+    stripped = _clean_inline_text(line)
+    stripped = _HEADING_MARKERS_RE.sub("", stripped).strip()
     for pattern in (_BULLET_RE, _NUMBERED_RE):
         m = pattern.match(stripped)
         if m:
@@ -505,3 +669,27 @@ def _clean_bullet(line: str) -> str:
     if stripped.endswith("。"):
         stripped = stripped[:-1]
     return stripped
+
+
+def _clean_inline_text(text: str) -> str:
+    """PDF抽出由来のインライン装飾タグを除去する。"""
+    cleaned = _HTML_BREAK_RE.sub(" ", text)
+    cleaned = _HTML_TAG_RE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _sanitize_value(value: Any) -> Any:
+    """slideData の文字列値を再帰的に正規化する。"""
+    if isinstance(value, str):
+        return _clean_inline_text(value)
+    if isinstance(value, list):
+        return [_sanitize_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_value(item) for key, item in value.items()}
+    return value
+
+
+def _sanitize_slide(slide: dict[str, Any]) -> dict[str, Any]:
+    """最終JSONに入る直前で title / points / table セル等を正規化する。"""
+    return {key: _sanitize_value(value) for key, value in slide.items()}

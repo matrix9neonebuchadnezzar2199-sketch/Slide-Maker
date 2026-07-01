@@ -13,6 +13,7 @@ from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Pt
 
 import schema
+from table_parser import is_markdown_table_row, parse_markdown_table_block
 import utils
 
 logger = logging.getLogger(__name__)
@@ -244,6 +245,10 @@ def render_section(prs: Presentation, s: dict[str, Any]) -> None:
 
 def render_content(prs: Presentation, s: dict[str, Any]) -> None:
     """箇条書き本文スライドを描画する。"""
+    points = [str(p) for p in (s.get("points") or [])]
+    if _render_markdown_table_content_if_needed(prs, s, points):
+        return
+
     slide = _add_slide(prs)
     _draw_header(slide, s)
 
@@ -255,22 +260,75 @@ def render_content(prs: Presentation, s: dict[str, Any]) -> None:
             left = schema.MARGIN_X + ci * (col_w + gap)
             _draw_bullet_list(slide, left, schema.BODY_Y, col_w, col_items or [])
     else:
-        points = s.get("points") or []
         _draw_bullet_list(slide, schema.MARGIN_X, schema.BODY_Y, schema.CONTENT_W, points)
+
+
+def _render_markdown_table_content_if_needed(
+    prs: Presentation,
+    s: dict[str, Any],
+    points: list[str],
+) -> bool:
+    """content に漏れた Markdown 表を、本物の PowerPoint 表として描画する。"""
+    table_lines = [line for line in points if is_markdown_table_row(line)]
+    if len(table_lines) < 2:
+        return False
+
+    # 表以外の文章が混じる場合は content として扱い、誤変換を避ける。
+    if len(table_lines) != len([line for line in points if line.strip()]):
+        return False
+
+    parsed = parse_markdown_table_block(table_lines)
+    if not parsed:
+        return False
+
+    table_slide = dict(parsed)
+    table_slide["title"] = s.get("title") or "データ一覧"
+    render_table(prs, table_slide)
+    return True
 
 
 def _draw_bullet_list(slide, left: Emu, top: Emu, width: Emu, items: list[str]) -> None:
     """箇条書きリストを描画する。"""
     for i, item in enumerate(items):
         y = top + i * schema.BULLET_LINE_H
-        _add_textbox(
-            slide, left, y, Emu(200000), schema.BULLET_LINE_H,
-            "•", font_size=schema.SIZE_BODY, color=schema.ACCENT,
+        _add_bullet_rich_textbox(slide, left, y, width, schema.BULLET_LINE_H, str(item))
+
+
+def _add_bullet_rich_textbox(
+    slide,
+    left: Emu,
+    top: Emu,
+    width: Emu,
+    height: Emu,
+    text: str,
+) -> Any:
+    """箇条点と本文を同一段落内に描画する。"""
+    box = slide.shapes.add_textbox(left, top, width, height)
+    tf = box.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_ANCHOR.TOP
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.LEFT
+
+    bullet_run = p.add_run()
+    bullet_run.text = "• "
+    schema.set_jp_font(bullet_run, size=schema.SIZE_BODY, color=schema.ACCENT, bold=True)
+
+    for seg_text, seg_bold, seg_emphasis in _parse_inline_markup(text):
+        if not seg_text:
+            continue
+        run = p.add_run()
+        run.text = seg_text
+        seg_color = schema.PRIMARY if seg_emphasis else schema.TEXT_MAIN
+        schema.set_jp_font(
+            run,
+            size=schema.SIZE_BODY,
+            color=seg_color,
+            bold=seg_bold or seg_emphasis,
         )
-        _add_rich_textbox(
-            slide, left + Emu(250000), y, width - Emu(250000), schema.BULLET_LINE_H,
-            item, font_size=schema.SIZE_BODY,
-        )
+
+    return box
+
 
 
 def render_agenda(prs: Presentation, s: dict[str, Any]) -> None:

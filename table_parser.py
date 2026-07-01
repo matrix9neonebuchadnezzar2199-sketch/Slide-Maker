@@ -8,6 +8,7 @@ from typing import Any
 _MD_TABLE_ROW_RE = re.compile(r"^\s*\|.+\|\s*$")
 _MD_SEP_ROW_RE = re.compile(r"^\s*\|[\s\-:|\u2014]+\|\s*$")
 _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def is_markdown_table_row(line: str) -> bool:
@@ -23,6 +24,7 @@ def is_separator_row(line: str) -> bool:
 def clean_cell(text: str) -> str:
     """セル内の HTML・余白を除去する。"""
     cleaned = _BR_RE.sub(" ", text)
+    cleaned = _HTML_TAG_RE.sub("", cleaned)
     return cleaned.strip()
 
 

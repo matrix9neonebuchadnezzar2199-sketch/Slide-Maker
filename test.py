@@ -163,7 +163,7 @@ def test_user_markdown_table_to_slide_data() -> None:
 
     title_slide = slides[0]
     assert title_slide["type"] == "title"
-    assert title_slide["title"] == "くら寿司5月度月次情報"
+    assert title_slide["title"] == "くら寿司月次"
     assert title_slide["title"] != "2026年6月18日"
 
     table_slides = [s for s in slides if s.get("type") == "table"]
@@ -228,6 +228,100 @@ def test_user_cover_title_first_h2_not_later_heading() -> None:
     assert cover_dup_content == []
 
 
+def test_user_cover_title_plain_text_before_table() -> None:
+    """## 無しのプレーンテキストタイトル + 表セル由来 ## 1Q 等を正しく処理。"""
+    text = """2026年6月18日
+くら寿司5月度月次情報
+|指標|5月|
+|---|---|
+|売上|100|
+
+## 1Q
+
+## 年度 11月 12月 1月
+
+## 2月
+
+## ◎日本・米国・アジア店舗数推移
+
+|国|5月|
+|---|---|
+|日本|10|
+"""
+    slides = rule_mode.build_slide_data(text, pdf_stem="fallback")
+    assert slides[0]["title"] == "くら寿司5月度月次情報"
+    store_table = [s for s in slides if s.get("type") == "table" and "店舗数" in s.get("title", "")]
+    assert len(store_table) == 1
+    assert store_table[0]["title"] == "◎日本・米国・アジア店舗数推移"
+
+
+def test_user_cover_title_user_override() -> None:
+    """ユーザー指定の表紙タイトルが最優先で反映される。"""
+    text = """## 誤タイトル
+
+|A|B|
+|---|---|
+|1|2|
+"""
+    slides = rule_mode.build_slide_data(
+        text,
+        pdf_stem="fallback",
+        cover_title="くら寿司5月度月次情報",
+    )
+    assert slides[0]["title"] == "くら寿司5月度月次情報"
+
+
+def test_user_kpi_not_generated_from_prose_percentages() -> None:
+    """文章に散在する％から kpi が暴発しない。"""
+    text = """## 経済動向
+
+政府は、景気の現状について報告した。
+物価は総じて1.0％程度で推移している。
+２％の物価安定目標に向けて政策を継続する。
+前期比0.3％増となった。
+"""
+    slides = rule_mode.build_slide_data(text, pdf_stem="月例経済報告")
+    assert not any(s.get("type") == "kpi" for s in slides)
+    assert any(s.get("type") == "content" for s in slides)
+
+
+def test_user_h4_heading_markers_stripped_from_points() -> None:
+    """H4 見出し記号が content points に残らない。"""
+    text = """## 報告
+
+#### 令和８年６月30日
+- 景気は緩やかに回復している。
+"""
+    slides = rule_mode.build_slide_data(text, pdf_stem="fallback")
+    content = [s for s in slides if s.get("type") == "content"]
+    assert content
+    joined = json.dumps(content, ensure_ascii=False)
+    assert "####" not in joined
+    assert "令和８年６月30日" in joined
+
+
+def test_user_html_tags_stripped_from_json() -> None:
+    """見出し・本文・表セルの HTML タグが JSON に残らない。"""
+    text = """## <u>個人消費は、持ち直しの動きがみられる。</u>
+
+- <b>雇用情勢</b>は改善している。
+
+## 表
+
+|項目|内容|
+|---|---|
+|<u>消費</u>|持ち直し<br>継続|
+"""
+    slides = rule_mode.build_slide_data(text, pdf_stem="fallback")
+    joined = json.dumps(slides, ensure_ascii=False)
+    assert "<u>" not in joined
+    assert "</u>" not in joined
+    assert "<b>" not in joined
+    assert "<br>" not in joined.lower()
+    assert "個人消費は、持ち直しの動きがみられる。" in joined
+    assert "持ち直し 継続" in joined
+
+
 def run_all() -> int:
     """全シナリオを実行し、失敗数を返す。"""
     tests = [
@@ -241,6 +335,11 @@ def run_all() -> int:
         test_user_markdown_table_to_slide_data,
         test_user_title_skips_date_only_content,
         test_user_cover_title_first_h2_not_later_heading,
+        test_user_cover_title_plain_text_before_table,
+        test_user_cover_title_user_override,
+        test_user_kpi_not_generated_from_prose_percentages,
+        test_user_h4_heading_markers_stripped_from_points,
+        test_user_html_tags_stripped_from_json,
     ]
     failed = 0
     for fn in tests:

@@ -15,6 +15,7 @@ import tkinter.font as tkfont
 
 import json_builder
 import renderer
+import ui_theme
 import validator
 from llm_mode import LlmModeNotImplementedError
 
@@ -60,71 +61,225 @@ def _resolve_output_path(output_dir: str, pdf_path: str) -> Path:
 class SlideMakerApp:
     """メインアプリケーションウィンドウ。"""
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, *, font_family: str) -> None:
         self.root = root
+        self._font_family = font_family
         self.root.title(APP_TITLE)
-        self.root.minsize(800, 600)
-        self.root.geometry("1000x700")
+        self.root.minsize(ui_theme.MIN_WINDOW_WIDTH, ui_theme.MIN_WINDOW_HEIGHT)
+        self.root.geometry(ui_theme.DEFAULT_GEOMETRY)
 
         self._pdf_path = tk.StringVar()
+        self._cover_title = tk.StringVar()
         self._output_dir = tk.StringVar()
         self._mode = tk.StringVar(value="rule")
         self._status = tk.StringVar(value="準備完了")
         self._busy = False
 
+        self._style = ui_theme.apply_theme(root, font_family=font_family)
         self._build_ui()
 
     def _build_ui(self) -> None:
-        """UI コンポーネントを構築する。"""
-        top = ttk.Frame(self.root, padding=8)
-        top.pack(fill=tk.X)
+        """UI コンポーネントを構築する（操作領域を固定し、JSON領域だけ伸縮）。"""
+        self.root.grid_rowconfigure(0, weight=0)
+        self.root.grid_rowconfigure(1, weight=1, minsize=360)
+        self.root.grid_rowconfigure(2, weight=0)
+        self.root.grid_columnconfigure(0, weight=1)
 
-        # --- ステップ① PDF 選択 ---
-        pdf_row = ttk.Frame(top)
-        pdf_row.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(pdf_row, text="① PDF:").pack(side=tk.LEFT)
-        ttk.Entry(pdf_row, textvariable=self._pdf_path, width=70).pack(side=tk.LEFT, padx=4, fill=tk.X, expand=True)
-        self._btn_pdf = ttk.Button(pdf_row, text="参照...", command=self._on_select_pdf)
-        self._btn_pdf.pack(side=tk.LEFT)
+        self._build_header()
+        self._build_body()
+        self._build_footer()
 
-        # --- ステップ② モード選択 + JSON 生成 ---
-        mode_row = ttk.Frame(top)
-        mode_row.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(mode_row, text="② モード:").pack(side=tk.LEFT)
+    def _build_header(self) -> None:
+        """トップバー（濃緑）。"""
+        header = tk.Frame(self.root, bg=ui_theme.GREEN_DEEP, padx=28, pady=18)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(header, text="Slide-Maker", style="Header.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            header,
+            text="PDF → slideData JSON → PowerPoint 下書き生成",
+            style="HeaderSub.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+    def _build_body(self) -> None:
+        """入力カード + JSON エディタ（中央のみ伸縮）。"""
+        body = ttk.Frame(self.root, padding=(22, 18))
+        body.grid(row=1, column=0, sticky="nsew")
+        body.grid_rowconfigure(0, weight=0)
+        body.grid_rowconfigure(1, weight=1, minsize=260)
+        body.grid_columnconfigure(0, weight=1)
+
+        input_card = self._make_card(body, row=0)
+        self._build_input_section(input_card)
+
+        json_card = self._make_card(body, row=1, pady_top=12)
+        self._build_json_section(json_card)
+
+    def _make_card(self, parent: ttk.Frame, *, row: int, pady_top: int = 0) -> ttk.Frame:
+        """クリーム色のカード枠を作る。"""
+        outer = tk.Frame(
+            parent,
+            bg=ui_theme.CARD_BORDER,
+            highlightbackground=ui_theme.CARD_BORDER,
+            highlightthickness=1,
+        )
+        outer.grid(row=row, column=0, sticky="nsew", pady=(pady_top, 0))
+        outer.grid_rowconfigure(0, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
+
+        card = ttk.Frame(outer, style="Card.TFrame", padding=18)
+        card.grid(row=0, column=0, sticky="nsew", padx=1, pady=1)
+        card.grid_columnconfigure(0, minsize=46)
+        card.grid_columnconfigure(1, minsize=210)
+        card.grid_columnconfigure(2, weight=1, minsize=360)
+        card.grid_columnconfigure(3, minsize=104)
+        return card
+
+    def _build_input_section(self, card: ttk.Frame) -> None:
+        """ステップ①②の入力欄。"""
+        ttk.Label(card, text="入力", style="Section.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 14),
+        )
+
+        self._add_labeled_entry(card, row=1, step="①", label="PDF", textvariable=self._pdf_path)
+        self._btn_pdf = ttk.Button(card, text="参照...", command=self._on_select_pdf)
+        self._btn_pdf.grid(row=1, column=3, sticky="ew", padx=(12, 0), pady=6)
+
+        self._add_labeled_entry(
+            card,
+            row=2,
+            step="",
+            label="プレゼンのタイトル（表紙）",
+            textvariable=self._cover_title,
+        )
+
+        mode_row = ttk.Frame(card, style="Card.TFrame")
+        mode_row.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        ttk.Label(mode_row, text="②", style="Step.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(mode_row, text="モード", style="Card.TLabel").pack(side=tk.LEFT, padx=(0, 16))
         ttk.Radiobutton(mode_row, text="ルールベース", variable=self._mode, value="rule").pack(side=tk.LEFT, padx=4)
-        ttk.Radiobutton(mode_row, text="LLM", variable=self._mode, value="llm").pack(side=tk.LEFT, padx=4)
-        self._btn_json = ttk.Button(mode_row, text="JSON 生成", command=self._on_generate_json)
-        self._btn_json.pack(side=tk.LEFT, padx=8)
+        ttk.Radiobutton(mode_row, text="LLM", variable=self._mode, value="llm").pack(side=tk.LEFT, padx=(12, 4))
+        self._btn_json = ttk.Button(
+            mode_row, text="JSON 生成", style="Accent.TButton", command=self._on_generate_json,
+        )
+        self._btn_json.pack(side=tk.LEFT, padx=(24, 0))
 
-        # --- ステップ③④ JSON 編集エリア ---
-        mid = ttk.Frame(self.root, padding=(8, 0))
-        mid.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(mid, text="③④ slideData JSON（編集可）:").pack(anchor=tk.W)
-        self._json_text = scrolledtext.ScrolledText(mid, wrap=tk.WORD, font=("Consolas", 11))
-        self._json_text.pack(fill=tk.BOTH, expand=True, pady=4)
+    def _add_labeled_entry(
+        self,
+        parent: ttk.Frame,
+        *,
+        row: int,
+        step: str,
+        label: str,
+        textvariable: tk.StringVar,
+    ) -> None:
+        """固定4列のラベル + Entry 行。"""
+        ttk.Label(parent, text=step, style="Step.TLabel").grid(row=row, column=0, sticky="w", pady=6)
 
-        # --- ステップ⑤ 検証・出力 ---
-        bottom = ttk.Frame(self.root, padding=8)
-        bottom.pack(fill=tk.X)
+        ttk.Label(parent, text=label, style="Card.TLabel").grid(
+            row=row, column=1, sticky="w", padx=(0, 14), pady=6,
+        )
+        entry = ttk.Entry(parent, textvariable=textvariable)
+        entry.grid(row=row, column=2, sticky="ew", pady=6)
 
-        out_row = ttk.Frame(bottom)
-        out_row.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(out_row, text="⑤ 出力先:").pack(side=tk.LEFT)
-        ttk.Entry(out_row, textvariable=self._output_dir, width=60).pack(side=tk.LEFT, padx=4, fill=tk.X, expand=True)
-        self._btn_out = ttk.Button(out_row, text="参照...", command=self._on_select_output)
-        self._btn_out.pack(side=tk.LEFT)
+    def _build_json_section(self, card: ttk.Frame) -> None:
+        """ステップ③④ JSON エディタ。"""
+        card.grid_rowconfigure(2, weight=1, minsize=220)
+        card.grid_columnconfigure(0, weight=1)
 
-        action_row = ttk.Frame(bottom)
-        action_row.pack(fill=tk.X, pady=(4, 0))
+        header_row = ttk.Frame(card, style="Card.TFrame")
+        header_row.grid(row=0, column=0, sticky="ew")
+        ttk.Label(header_row, text="③④", style="Step.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(
+            header_row,
+            text="slideData JSON（編集可）",
+            style="Section.TLabel",
+        ).pack(side=tk.LEFT)
+
+        self._draft_label = ttk.Label(
+            card,
+            text=(
+                "これは下書きです。タイトルや文言は、下のJSONを直接編集して仕上げてください。"
+                "特に表紙タイトルと各スライドのタイトルは、内容に合わせて浄書することをおすすめします。"
+            ),
+            style="CardMuted.TLabel",
+            wraplength=900,
+            justify=tk.LEFT,
+        )
+        self._draft_label.grid(row=1, column=0, sticky="ew", pady=(8, 6))
+
+        text_frame = tk.Frame(
+            card,
+            bg=ui_theme.WHITE,
+            highlightbackground=ui_theme.BORDER,
+            highlightthickness=1,
+        )
+        text_frame.grid(row=2, column=0, sticky="nsew")
+        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_columnconfigure(0, weight=1)
+
+        self._json_text = scrolledtext.ScrolledText(
+            text_frame,
+            wrap=tk.WORD,
+            font=("Consolas", 12),
+            bg=ui_theme.WHITE,
+            fg=ui_theme.TEXT_MAIN,
+            insertbackground=ui_theme.GREEN_EMERALD,
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=8,
+            pady=8,
+        )
+        self._json_text.grid(row=0, column=0, sticky="nsew")
+
+        card.bind("<Configure>", self._on_json_card_resize)
+
+    def _on_json_card_resize(self, event: tk.Event) -> None:
+        """下書きラベルの折り返し幅をカード幅に追従させる。"""
+        wrap = max(400, event.width - 40)
+        self._draft_label.configure(wraplength=wrap)
+
+    def _build_footer(self) -> None:
+        """ステップ⑤ + アクションボタン + ステータスバー（常に表示）。"""
+        footer_wrap = tk.Frame(self.root, bg=ui_theme.APP_BG)
+        footer_wrap.grid(row=2, column=0, sticky="ew")
+        footer_wrap.grid_columnconfigure(0, weight=1)
+
+        footer_outer = tk.Frame(
+            footer_wrap,
+            bg=ui_theme.CARD_BORDER,
+            highlightbackground=ui_theme.CARD_BORDER,
+            highlightthickness=1,
+        )
+        footer_outer.grid(row=0, column=0, sticky="ew", padx=22, pady=(0, 10))
+        footer_outer.grid_columnconfigure(0, weight=1)
+
+        footer_card = ttk.Frame(footer_outer, style="Card.TFrame", padding=16)
+        footer_card.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
+        footer_card.grid_columnconfigure(0, minsize=46)
+        footer_card.grid_columnconfigure(1, minsize=96)
+        footer_card.grid_columnconfigure(2, weight=1, minsize=320)
+
+        ttk.Label(footer_card, text="⑤", style="Step.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(footer_card, text="出力先", style="Card.TLabel").grid(row=0, column=1, sticky="w", padx=(0, 14))
+        ttk.Entry(footer_card, textvariable=self._output_dir).grid(row=0, column=2, sticky="ew", padx=(0, 12))
+        self._btn_out = ttk.Button(footer_card, text="参照...", command=self._on_select_output)
+        self._btn_out.grid(row=0, column=3, sticky="e")
+
+        action_row = ttk.Frame(footer_card, style="Card.TFrame")
+        action_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         self._btn_validate = ttk.Button(action_row, text="検証", command=self._on_validate)
-        self._btn_validate.pack(side=tk.LEFT, padx=(0, 8))
-        self._btn_build = ttk.Button(action_row, text="スライド作成", command=self._on_build_pptx)
+        self._btn_validate.pack(side=tk.LEFT, padx=(0, 10))
+        self._btn_build = ttk.Button(
+            action_row, text="スライド作成", style="Accent.TButton", command=self._on_build_pptx,
+        )
         self._btn_build.pack(side=tk.LEFT)
 
-        status_row = ttk.Frame(bottom)
-        status_row.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(status_row, text="状態:").pack(side=tk.LEFT)
-        ttk.Label(status_row, textvariable=self._status).pack(side=tk.LEFT, padx=4)
+        status_bar = tk.Frame(footer_wrap, bg=ui_theme.GREEN_DEEP, padx=16, pady=8)
+        status_bar.grid(row=1, column=0, sticky="ew")
+        ttk.Label(status_bar, text="状態:", style="Status.TLabel").pack(side=tk.LEFT)
+        ttk.Label(status_bar, textvariable=self._status, style="StatusValue.TLabel").pack(side=tk.LEFT, padx=(6, 0))
 
     def _set_busy(self, busy: bool, status: str = "") -> None:
         """処理中フラグとボタン状態を切り替える。"""
@@ -145,6 +300,8 @@ class SlideMakerApp:
             self._pdf_path.set(path)
             if not self._output_dir.get():
                 self._output_dir.set(str(Path(path).parent))
+            if not self._cover_title.get().strip():
+                self._cover_title.set(json_builder.suggest_cover_title_from_stem(Path(path).stem))
 
     def _on_select_output(self) -> None:
         """出力先フォルダを選択する。"""
@@ -163,11 +320,16 @@ class SlideMakerApp:
             return
 
         mode = self._mode.get()
+        cover_title = self._cover_title.get().strip()
         self._set_busy(True, "JSON生成中...")
 
         def worker() -> None:
             try:
-                data = json_builder.build_from_pdf(pdf, mode=mode)  # type: ignore[arg-type]
+                data = json_builder.build_from_pdf(
+                    pdf,
+                    mode=mode,  # type: ignore[arg-type]
+                    cover_title=cover_title or None,
+                )
                 text = json.dumps(data, ensure_ascii=False, indent=2)
                 self.root.after(0, lambda: self._finish_json_ok(text))
             except LlmModeNotImplementedError as exc:
@@ -264,7 +426,7 @@ def run_app() -> None:
     root = tk.Tk()
     family = _pick_ui_font_family()
     root.option_add("*Font", (family, 11))
-    SlideMakerApp(root)
+    SlideMakerApp(root, font_family=family)
     root.mainloop()
 
 

@@ -9,7 +9,12 @@ class LlmModeNotImplementedError(Exception):
     """LLM モードが未実装であることを示す。"""
 
 
-def build_slide_data(text: str, *, pdf_stem: str = "") -> list[dict[str, Any]]:
+def build_slide_data(
+    text: str,
+    *,
+    pdf_stem: str = "",
+    cover_title: str | None = None,
+) -> list[dict[str, Any]]:
     """LLM で slideData を生成する（第4弾で実装予定）。
 
     Args:
