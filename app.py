@@ -79,10 +79,12 @@ class SlideMakerApp:
         self._current_slide_data: list[dict] | None = None
         self._title_vars: dict[int, tk.StringVar] = {}
         self._llm_model_ready = False
+        self._llm_preload_started = False
 
         self._style = ui_theme.apply_theme(root, font_family=font_family)
         self._build_ui()
-        self._start_llm_preload()
+        self._set_llm_banner("standby")
+        self._use_ai_titles.trace_add("write", self._on_ai_titles_toggle)
 
     def _build_ui(self) -> None:
         """UI コンポーネントを構築する。"""
@@ -370,6 +372,12 @@ class SlideMakerApp:
                 bg=ui_theme.BANNER_READY_BG,
             )
             self._llm_model_ready = True
+        elif state == "standby":
+            self._llm_banner.configure(
+                text="AIモデル待機中（利用時に読込）",
+                bg=ui_theme.BANNER_WARN_BG,
+            )
+            self._llm_model_ready = False
         else:
             self._llm_banner.configure(
                 text="AIモデル未起動（ルールベースのみ）",
@@ -377,14 +385,32 @@ class SlideMakerApp:
             )
             self._llm_model_ready = False
 
+    def _on_ai_titles_toggle(self, *_args: object) -> None:
+        """AI タイトル利用時のみモデルを読み込む（Glaux 手動起動相当）。"""
+        if self._use_ai_titles.get():
+            self._start_llm_preload()
+
     def _start_llm_preload(self) -> None:
-        """起動直後に LLM をバックグラウンドでロードする。"""
+        """AI 利用時に LLM をバックグラウンドでロードする。"""
+        if self._llm_preload_started:
+            return
+        if llm_mode.resolve_model_path() is None:
+            self._set_llm_banner("failed")
+            return
+
+        self._llm_preload_started = True
         self._set_llm_banner("loading")
 
         def worker() -> None:
-            model = llm_mode.load_model()
-            state = "ready" if model is not None else "failed"
-            self.root.after(0, lambda: self._set_llm_banner(state))
+            try:
+                
+                model = llm_mode.load_model()
+                state = "ready" if model is not None else "failed"
+                
+                self.root.after(0, lambda: self._set_llm_banner(state))
+            except Exception as exc:
+                
+                self.root.after(0, lambda: self._set_llm_banner("failed"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -497,6 +523,8 @@ class SlideMakerApp:
 
         cover_title = self._cover_title.get().strip()
         use_ai = self._use_ai_titles.get()
+        if use_ai:
+            self._start_llm_preload()
         self._set_busy(True, "JSON生成中...")
         if use_ai:
             self._show_progress(0, 1, "AIにより処理中・・・")

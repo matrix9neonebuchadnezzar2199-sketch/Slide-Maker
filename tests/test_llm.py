@@ -221,14 +221,20 @@ def test_resolve_model_path_falls_back_to_any_gguf(tmp_path, monkeypatch) -> Non
 
 def test_build_llama_load_kwargs_low_memory() -> None:
     """低メモリ llama-cpp 引数が schema 定数と一致する。"""
+    from llama_cpp import llama_cpp
+
     kwargs = llm_mode.build_llama_load_kwargs("/path/to/model.gguf")
     assert kwargs["model_path"] == "/path/to/model.gguf"
     assert kwargs["n_ctx"] == schema.LLM_N_CTX
     assert kwargs["n_threads"] == schema.LLM_N_THREADS
     assert kwargs["n_batch"] == schema.LLM_N_BATCH
+    assert kwargs["n_ubatch"] == schema.LLM_N_UBATCH
     assert kwargs["n_gpu_layers"] == schema.LLM_N_GPU_LAYERS
+    assert kwargs["type_k"] == llama_cpp.GGML_TYPE_Q8_0
+    assert kwargs["type_v"] == llama_cpp.GGML_TYPE_Q8_0
+    assert kwargs["op_offload"] is False
+    assert kwargs["use_mmap"] is True
     assert kwargs["verbose"] is False
-    assert "type_k" not in kwargs
 
 
 def test_load_model_uses_low_memory_kwargs(tmp_path, monkeypatch) -> None:
@@ -248,11 +254,13 @@ def test_load_model_uses_low_memory_kwargs(tmp_path, monkeypatch) -> None:
             captured.update(kwargs)
 
     with patch.object(llm_mode, "_app_base_dir", return_value=tmp_path):
-        with patch.dict("sys.modules", {"llama_cpp": type("M", (), {"Llama": _FakeLlama})()}):
-            with patch("llm_mode.Llama", _FakeLlama, create=True):
-                # _load_llama_with_fallback 内の import を直接パッチ
-                with patch.object(llm_mode, "_load_llama_with_fallback", side_effect=lambda p: _FakeLlama(**llm_mode.build_llama_load_kwargs(p))):
-                    model = llm_mode.load_model(force_reload=True)
+        with patch.object(llm_mode.llama_server, "resolve_server_exe", return_value=None):
+            with patch.object(
+                llm_mode,
+                "_load_llama_with_fallback",
+                side_effect=lambda _p: _FakeLlama(**llm_mode.build_llama_load_kwargs(_p)),
+            ):
+                model = llm_mode.load_model(force_reload=True)
 
     assert model is not None
     assert captured["n_ctx"] == schema.LLM_N_CTX

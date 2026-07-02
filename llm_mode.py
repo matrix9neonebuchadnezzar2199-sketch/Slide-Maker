@@ -8,12 +8,18 @@ import logging
 import os
 import re
 import sys
+import threading
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 
 import schema
 import slide_sync
+
+try:
+    import llama_server
+except ImportError:
+    llama_server = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +34,7 @@ _SKIP_TITLE_TYPES = frozenset({"title", "section", "closing"})
 
 _cached_model: Any | None = None
 _model_load_attempted = False
+_load_lock = threading.Lock()
 
 _SYSTEM_PROMPT = (
     "あなたは日本語の見出しを短くする編集者です。"
@@ -80,6 +87,8 @@ def _app_base_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+
+
 def resolve_model_path() -> Path | None:
     """利用可能な GGUF モデルパスを解決する。
 
@@ -87,114 +96,213 @@ def resolve_model_path() -> Path | None:
     → ``model/*.gguf`` の先頭。
     """
     env_path = os.environ.get("SLIDEMAKER_LLM_MODEL", "").strip()
+    base_dir = _app_base_dir()
+    model_dir = base_dir / "model"
+    default_model = model_dir / schema.LLM_DEFAULT_MODEL_NAME
+    ggufs = sorted(model_dir.glob("*.gguf")) if model_dir.is_dir() else []
+
+    
+
     if env_path:
         candidate = Path(env_path)
         if candidate.is_file():
+            
             return candidate
 
-    model_dir = _app_base_dir() / "model"
+    model_dir = base_dir / "model"
     if not model_dir.is_dir():
+        
         return None
 
     default_model = model_dir / schema.LLM_DEFAULT_MODEL_NAME
     if default_model.is_file():
+        
         return default_model
 
     ggufs = sorted(model_dir.glob("*.gguf"))
     if ggufs:
+        
         return ggufs[0]
+    
     return None
 
 
 def build_llama_load_kwargs(model_path: str | Path) -> dict[str, Any]:
     """低メモリ llama-cpp-python ロード引数を返す（Glaux 節約設定準拠）。"""
+    kv_type = _kv_cache_type_id(schema.LLM_KV_CACHE_TYPE)
     return {
         "model_path": str(model_path),
         "n_ctx": int(schema.LLM_N_CTX),
         "n_threads": int(schema.LLM_N_THREADS),
         "n_batch": int(schema.LLM_N_BATCH),
+        "n_ubatch": int(schema.LLM_N_UBATCH),
         "n_gpu_layers": int(schema.LLM_N_GPU_LAYERS),
+        "type_k": kv_type,
+        "type_v": kv_type,
+        "op_offload": bool(schema.LLM_OP_OFFLOAD),
+        "use_mmap": bool(schema.LLM_USE_MMAP),
+        "use_mlock": bool(schema.LLM_USE_MLOCK),
         "verbose": False,
     }
+
+
+def _kv_cache_type_id(type_name: str) -> int:
+    """KV キャッシュ型名（q8_0 等）を llama_cpp 定数に変換する。"""
+    from llama_cpp import llama_cpp
+
+    table = {
+        "q8_0": llama_cpp.GGML_TYPE_Q8_0,
+        "q4_0": llama_cpp.GGML_TYPE_Q4_0,
+        "f16": llama_cpp.GGML_TYPE_F16,
+    }
+    return table.get(type_name.lower(), llama_cpp.GGML_TYPE_Q8_0)
+
+
+def _llama_load_tiers(model_path: Path) -> list[tuple[str, dict[str, Any]]]:
+    """Glaux 準拠の段階的ロード引数（未対応キーは次ティアへ）。"""
+    full = build_llama_load_kwargs(model_path)
+    mid = {
+        key: value
+        for key, value in full.items()
+        if key not in ("type_k", "type_v", "n_ubatch", "op_offload")
+    }
+    minimal = {
+        "model_path": str(model_path),
+        "n_ctx": int(schema.LLM_N_CTX),
+        "n_threads": int(schema.LLM_N_THREADS),
+        "n_gpu_layers": int(schema.LLM_N_GPU_LAYERS),
+        "use_mmap": bool(schema.LLM_USE_MMAP),
+        "verbose": False,
+    }
+    return [("full", full), ("mid", mid), ("minimal", minimal)]
+
+
+def _ensure_llama_dll_paths() -> None:
+    """frozen EXE で llama_cpp / MSVC DLL を探索できるようにする。"""
+    if not getattr(sys, "frozen", False):
+        return
+    meipass = getattr(sys, "_MEIPASS", "")
+    if not meipass:
+        return
+    if hasattr(os, "add_dll_directory"):
+        for sub in ("", "llama_cpp", "llama_cpp/lib"):
+            path = os.path.join(meipass, sub) if sub else meipass
+            if os.path.isdir(path):
+                os.add_dll_directory(path)  # type: ignore[attr-defined]
 
 
 def _load_llama_with_fallback(model_path: Path) -> Any:
     """低メモリ設定で Llama をロードする。未対応引数は段階的に削って再試行。"""
     from llama_cpp import Llama
 
-    full_kwargs = build_llama_load_kwargs(model_path)
-    try:
-        return Llama(**full_kwargs)
-    except TypeError as exc:
-        logger.warning("LLM full low-memory kwargs rejected, retrying minimal: %s", exc)
-    except Exception as exc:
-        logger.warning("LLM load with full kwargs failed, retrying minimal: %s", exc)
+    _ensure_llama_dll_paths()
+    gc.collect()
 
-    minimal_kwargs = {
-        "model_path": str(model_path),
-        "n_ctx": schema.LLM_N_CTX,
-        "n_threads": schema.LLM_N_THREADS,
-        "n_gpu_layers": schema.LLM_N_GPU_LAYERS,
-        "verbose": False,
-    }
-    return Llama(**minimal_kwargs)
+    last_exc: Exception | None = None
+    for tier_name, kwargs in _llama_load_tiers(model_path):
+        try:
+            model = Llama(**kwargs)
+            
+            logger.info("LLM loaded with tier=%s keys=%s", tier_name, sorted(kwargs.keys()))
+            return model
+        except TypeError as exc:
+            last_exc = exc
+            logger.warning("LLM tier %s TypeError, trying next: %s", tier_name, exc)
+            
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("LLM tier %s failed: %s", tier_name, exc)
+            
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("LLM load failed: no tiers available")
 
 
 def load_model(*, force_reload: bool = False) -> Any | None:
     """ローカル GGUF モデルを1回だけロードする。失敗時は None。"""
     global _cached_model, _model_load_attempted
 
-    if _model_load_attempted and not force_reload:
-        return _cached_model
+    with _load_lock:
+        if not force_reload:
+            if _cached_model is not None:
+                return _cached_model
+            if _model_load_attempted:
+                return _cached_model
 
-    _model_load_attempted = True
-    model_path = resolve_model_path()
-    if model_path is None:
-        logger.info("LLM model not found")
-        _cached_model = None
-        return None
+        _model_load_attempted = True
+        model_path = resolve_model_path()
+        if model_path is None:
+            logger.info("LLM model not found")
+            
+            _cached_model = None
+            return None
 
-    try:
-        from llama_cpp import Llama  # noqa: F401 — インストール確認
-    except ImportError:
-        logger.warning("llama-cpp-python is not installed")
-        _cached_model = None
-        return None
+        # Glaux 同等: llama-server 子プロセスを優先（frozen 配布はこちらのみ）
+        if llama_server is not None and llama_server.resolve_server_exe() is not None:
+            try:
+                _cached_model = llama_server.start_server(model_path)
+                logger.info(
+                    "LLM server started (Glaux low-memory): %s ctx=%d threads=%d",
+                    model_path,
+                    schema.LLM_N_CTX,
+                    schema.LLM_N_THREADS,
+                )
+                
+                return _cached_model
+            except Exception as exc:
+                logger.warning("LLM server start failed: %s", exc)
+                
+                _cached_model = None
+                return None
 
-    try:
-        _cached_model = _load_llama_with_fallback(model_path)
-        logger.info(
-            "LLM model loaded (low-memory): %s ctx=%d threads=%d",
-            model_path,
-            schema.LLM_N_CTX,
-            schema.LLM_N_THREADS,
-        )
-        return _cached_model
-    except Exception as exc:
-        logger.warning("LLM model load failed: %s", exc)
-        _cached_model = None
-        return None
+        # 開発用フォールバック: in-process llama-cpp-python
+        try:
+            from llama_cpp import Llama  # noqa: F401 — インストール確認
+        except (ImportError, OSError, FileNotFoundError) as exc:
+            logger.warning("llama-cpp-python is not available: %s", exc)
+            
+            _cached_model = None
+            return None
+
+        try:
+            _cached_model = _load_llama_with_fallback(model_path)
+            logger.info(
+                "LLM model loaded (embedded low-memory): %s ctx=%d threads=%d",
+                model_path,
+                schema.LLM_N_CTX,
+                schema.LLM_N_THREADS,
+            )
+            
+            return _cached_model
+        except Exception as exc:
+            logger.warning("LLM model load failed: %s", exc)
+            
+            _cached_model = None
+            return None
 
 
 def reset_model_cache() -> None:
     """テスト用 — モデルキャッシュをリセットする。"""
     global _cached_model, _model_load_attempted
-    _cached_model = None
-    _model_load_attempted = False
+    with _load_lock:
+        _cached_model = None
+        _model_load_attempted = False
 
 
 def unload_model() -> None:
     """ロード済み LLM を解放する（アプリ終了時）。"""
     global _cached_model, _model_load_attempted
-    if _cached_model is not None:
-        close_fn = getattr(_cached_model, "close", None)
-        if callable(close_fn):
-            try:
-                close_fn()
-            except Exception as exc:
-                logger.warning("LLM model close failed: %s", exc)
-        _cached_model = None
-    _model_load_attempted = False
+    with _load_lock:
+        if _cached_model is not None:
+            close_fn = getattr(_cached_model, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception as exc:
+                    logger.warning("LLM model close failed: %s", exc)
+            _cached_model = None
+        _model_load_attempted = False
     gc.collect()
     logger.info("LLM model unloaded")
 
@@ -280,23 +388,33 @@ def _build_user_prompt(original_title: str, slide_context: str = "") -> tuple[st
     return _SYSTEM_PROMPT_TITLE_ONLY, user_prompt
 
 
+def _extract_assistant_text(response: dict[str, Any]) -> str:
+    """chat completion 応答から本文を取り出す。"""
+    choice = response["choices"][0]
+    message = choice.get("message") or {}
+    return str(message.get("content", ""))
+
+
 def _call_llm_raw(model: Any, system_prompt: str, user_prompt: str) -> str:
     """モデルに chat completion を1回依頼する。"""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    kwargs = {
+        "messages": messages,
+        "max_tokens": schema.LLM_MAX_TOKENS,
+        "temperature": schema.LLM_TEMPERATURE,
+        "top_p": 0.9,
+        "stop": ["\n"],
+    }
+
+    # llama-server: HTTP 接続再利用のためスレッドプールを使わない
+    if llama_server is not None and isinstance(model, llama_server.LlamaServerClient):
+        return _extract_assistant_text(model.create_chat_completion(**kwargs))
 
     def _generate() -> str:
-        response = model.create_chat_completion(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=schema.LLM_MAX_TOKENS,
-            temperature=schema.LLM_TEMPERATURE,
-            top_p=0.9,
-            stop=["\n"],
-        )
-        choice = response["choices"][0]
-        message = choice.get("message") or {}
-        return str(message.get("content", ""))
+        return _extract_assistant_text(model.create_chat_completion(**kwargs))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_generate)

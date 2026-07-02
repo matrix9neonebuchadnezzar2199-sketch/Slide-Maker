@@ -8,3 +8,9 @@ build/
 *.pptx
 model/*.gguf
 model/.cache/
+runtime/
+assets/runtime-bundle.zip
+assets/runtime-bundle.sha256
+.cache/
+*.stderr.log
+llama-server-last.stderr.log
