@@ -193,9 +193,82 @@ def test_resolve_model_path_from_env(tmp_path, monkeypatch) -> None:
     assert llm_mode.resolve_model_path() == gguf
 
 
+def test_resolve_model_path_prefers_default_gemma(tmp_path, monkeypatch) -> None:
+    """既定 Gemma モデルが model/*.gguf の先頭より優先される。"""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    other = model_dir / "aaa-other.gguf"
+    other.write_bytes(b"fake")
+    default = model_dir / schema.LLM_DEFAULT_MODEL_NAME
+    default.write_bytes(b"fake")
+
+    monkeypatch.delenv("SLIDEMAKER_LLM_MODEL", raising=False)
+    with patch.object(llm_mode, "_app_base_dir", return_value=tmp_path):
+        assert llm_mode.resolve_model_path() == default
+
+
+def test_resolve_model_path_falls_back_to_any_gguf(tmp_path, monkeypatch) -> None:
+    """既定モデルが無い場合は model/*.gguf の先頭を使う。"""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    only = model_dir / "backup-model.gguf"
+    only.write_bytes(b"fake")
+
+    monkeypatch.delenv("SLIDEMAKER_LLM_MODEL", raising=False)
+    with patch.object(llm_mode, "_app_base_dir", return_value=tmp_path):
+        assert llm_mode.resolve_model_path() == only
+
+
+def test_build_llama_load_kwargs_low_memory() -> None:
+    """低メモリ llama-cpp 引数が schema 定数と一致する。"""
+    kwargs = llm_mode.build_llama_load_kwargs("/path/to/model.gguf")
+    assert kwargs["model_path"] == "/path/to/model.gguf"
+    assert kwargs["n_ctx"] == schema.LLM_N_CTX
+    assert kwargs["n_threads"] == schema.LLM_N_THREADS
+    assert kwargs["n_batch"] == schema.LLM_N_BATCH
+    assert kwargs["n_ubatch"] == schema.LLM_N_UBATCH
+    assert kwargs["n_gpu_layers"] == schema.LLM_N_GPU_LAYERS
+    assert kwargs["type_k"] == schema.LLM_KV_CACHE_TYPE
+    assert kwargs["type_v"] == schema.LLM_KV_CACHE_TYPE
+    assert kwargs["verbose"] is False
+
+
+def test_load_model_uses_low_memory_kwargs(tmp_path, monkeypatch) -> None:
+    """load_model は低メモリ kwargs で Llama を呼ぶ。"""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    gguf = model_dir / schema.LLM_DEFAULT_MODEL_NAME
+    gguf.write_bytes(b"fake")
+
+    llm_mode.reset_model_cache()
+    monkeypatch.delenv("SLIDEMAKER_LLM_MODEL", raising=False)
+
+    captured: dict[str, object] = {}
+
+    class _FakeLlama:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    with patch.object(llm_mode, "_app_base_dir", return_value=tmp_path):
+        with patch.dict("sys.modules", {"llama_cpp": type("M", (), {"Llama": _FakeLlama})()}):
+            with patch("llm_mode.Llama", _FakeLlama, create=True):
+                # _load_llama_with_fallback 内の import を直接パッチ
+                with patch.object(llm_mode, "_load_llama_with_fallback", side_effect=lambda p: _FakeLlama(**llm_mode.build_llama_load_kwargs(p))):
+                    model = llm_mode.load_model(force_reload=True)
+
+    assert model is not None
+    assert captured["n_ctx"] == schema.LLM_N_CTX
+    assert captured["n_threads"] == schema.LLM_N_THREADS
+    assert captured["n_gpu_layers"] == 0
+    llm_mode.reset_model_cache()
+
+
 def test_threshold_constants_match_spec() -> None:
     """schema 定数が SPEC と一致する。"""
     assert len(_LONG_CONTENT_TITLE) > schema.TITLE_SHORTEN_THRESHOLD
     assert schema.TITLE_SHORTEN_THRESHOLD == 30
     assert schema.TITLE_SHORTEN_MAX == 20
     assert schema.LLM_TIMEOUT_SEC == 15
+    assert schema.LLM_DEFAULT_MODEL_NAME == "gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf"
+    assert schema.LLM_N_CTX == 1000
+    assert schema.LLM_N_THREADS == 2

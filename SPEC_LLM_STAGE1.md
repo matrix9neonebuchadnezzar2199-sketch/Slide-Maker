@@ -24,7 +24,8 @@ extractor → rule_mode(slideData生成) → 【新規】llm_titlefix → valida
 ### 2.1 モデルロード
 
 - `llama-cpp-python` を使用。モデルは **EXEに同梱せず**、外部パスから読む。
-- モデルパスの取得順: ①環境変数 `SLIDEMAKER_LLM_MODEL` → ②既定パス `./model/` 内の `*.gguf` 最初の1件（配布版: `Slide-Maker.exe` と同階層の `model/`）。
+- モデルパスの取得順: ①環境変数 `SLIDEMAKER_LLM_MODEL` → ②既定 `./model/gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf` → ③ `./model/` 内の `*.gguf` 最初の1件（配布版: `Slide-Maker.exe` と同階層の `model/`）。
+- **低メモリロード**（Glaux `glaux-low-memory-llama-server` 準拠）: `n_ctx=1000`, `n_threads=2`, `n_batch=512`, `n_ubatch=128`, `n_gpu_layers=0`, KV `type_k`/`type_v`=`q8_0`。llama-cpp-python が一部引数未対応の場合は最小互換設定にフォールバック。
 - `config.json` は使わない（既存ツールに設定管理が無いため）。
 - モデルが見つからない/ロード失敗した場合は、例外を投げず `None` を返し、呼び出し側は「LLMなしで続行」する(全スライド素通り)。UIに「モデル未検出のためLLM補助をスキップしました」と1行表示。
 - ロードは1回だけ行い、プロセス内でキャッシュ(グローバル or シングルトン)。スライド毎の再ロード禁止。
@@ -83,6 +84,13 @@ TITLE_SHORTEN_MAX = 20
 LLM_TIMEOUT_SEC = 15
 LLM_MAX_TOKENS = 32
 LLM_TEMPERATURE = 0.1
+LLM_DEFAULT_MODEL_NAME = "gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf"
+LLM_N_CTX = 1000
+LLM_N_THREADS = 2
+LLM_N_BATCH = 512
+LLM_N_UBATCH = 128
+LLM_N_GPU_LAYERS = 0
+LLM_KV_CACHE_TYPE = "q8_0"
 ```
 
 ## 5. `requirements-llm.txt`

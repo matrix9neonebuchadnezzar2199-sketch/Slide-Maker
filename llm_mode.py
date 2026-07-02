@@ -71,7 +71,11 @@ def _app_base_dir() -> Path:
 
 
 def resolve_model_path() -> Path | None:
-    """利用可能な GGUF モデルパスを解決する。"""
+    """利用可能な GGUF モデルパスを解決する。
+
+    優先順: 環境変数 ``SLIDEMAKER_LLM_MODEL`` → 既定 ``model/gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf``
+    → ``model/*.gguf`` の先頭。
+    """
     env_path = os.environ.get("SLIDEMAKER_LLM_MODEL", "").strip()
     if env_path:
         candidate = Path(env_path)
@@ -79,11 +83,54 @@ def resolve_model_path() -> Path | None:
             return candidate
 
     model_dir = _app_base_dir() / "model"
-    if model_dir.is_dir():
-        ggufs = sorted(model_dir.glob("*.gguf"))
-        if ggufs:
-            return ggufs[0]
+    if not model_dir.is_dir():
+        return None
+
+    default_model = model_dir / schema.LLM_DEFAULT_MODEL_NAME
+    if default_model.is_file():
+        return default_model
+
+    ggufs = sorted(model_dir.glob("*.gguf"))
+    if ggufs:
+        return ggufs[0]
     return None
+
+
+def build_llama_load_kwargs(model_path: str | Path) -> dict[str, Any]:
+    """低メモリ llama-cpp-python ロード引数を返す（Glaux 節約設定準拠）。"""
+    return {
+        "model_path": str(model_path),
+        "n_ctx": schema.LLM_N_CTX,
+        "n_threads": schema.LLM_N_THREADS,
+        "n_batch": schema.LLM_N_BATCH,
+        "n_ubatch": schema.LLM_N_UBATCH,
+        "n_gpu_layers": schema.LLM_N_GPU_LAYERS,
+        "type_k": schema.LLM_KV_CACHE_TYPE,
+        "type_v": schema.LLM_KV_CACHE_TYPE,
+        "verbose": False,
+    }
+
+
+def _load_llama_with_fallback(model_path: Path) -> Any:
+    """低メモリ設定で Llama をロードする。未対応引数は段階的に削って再試行。"""
+    from llama_cpp import Llama
+
+    full_kwargs = build_llama_load_kwargs(model_path)
+    try:
+        return Llama(**full_kwargs)
+    except TypeError as exc:
+        logger.warning("LLM full low-memory kwargs rejected, retrying minimal: %s", exc)
+    except Exception as exc:
+        logger.warning("LLM load with full kwargs failed, retrying minimal: %s", exc)
+
+    minimal_kwargs = {
+        "model_path": str(model_path),
+        "n_ctx": schema.LLM_N_CTX,
+        "n_threads": schema.LLM_N_THREADS,
+        "n_gpu_layers": schema.LLM_N_GPU_LAYERS,
+        "verbose": False,
+    }
+    return Llama(**minimal_kwargs)
 
 
 def load_model(*, force_reload: bool = False) -> Any | None:
@@ -101,20 +148,20 @@ def load_model(*, force_reload: bool = False) -> Any | None:
         return None
 
     try:
-        from llama_cpp import Llama
+        from llama_cpp import Llama  # noqa: F401 — インストール確認
     except ImportError:
         logger.warning("llama-cpp-python is not installed")
         _cached_model = None
         return None
 
     try:
-        _cached_model = Llama(
-            model_path=str(model_path),
-            n_ctx=2048,
-            n_threads=max(1, (os.cpu_count() or 2) - 1),
-            verbose=False,
+        _cached_model = _load_llama_with_fallback(model_path)
+        logger.info(
+            "LLM model loaded (low-memory): %s ctx=%d threads=%d",
+            model_path,
+            schema.LLM_N_CTX,
+            schema.LLM_N_THREADS,
         )
-        logger.info("LLM model loaded: %s", model_path)
         return _cached_model
     except Exception as exc:
         logger.warning("LLM model load failed: %s", exc)

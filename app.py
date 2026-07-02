@@ -175,7 +175,7 @@ class SlideMakerApp:
         ).pack(side=tk.LEFT)
         ttk.Label(
             llm_row,
-            text="model/*.gguf 配置時のみ有効。長い content/table タイトルを短縮します。",
+            text="model/gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf 配置時のみ有効。長い content/table タイトルを短縮します。",
             style="CardMuted.TLabel",
         ).pack(side=tk.LEFT, padx=(12, 0))
 
