@@ -263,6 +263,49 @@ def test_load_model_uses_low_memory_kwargs(tmp_path, monkeypatch) -> None:
     llm_mode.reset_model_cache()
 
 
+def test_apply_ai_titles_skips_cover_section_closing() -> None:
+    """apply_ai_titles は表紙・section・closing を変更しない。"""
+    slides = [
+        {"type": "title", "title": _LONG_COVER_TITLE, "date": "2026.01.01"},
+        {"type": "section", "title": _LONG_SECTION_TITLE},
+        {"type": "content", "title": "旧", "points": ["消費は底堅い"]},
+        {"type": "closing"},
+    ]
+    model = _MockModel("生成タイトル")
+    ready: list[tuple[int, str]] = []
+
+    def on_ready(index: int, title: str) -> None:
+        ready.append((index, title))
+
+    result, status = llm_mode.apply_ai_titles(slides, model=model, title_ready_callback=on_ready)
+    assert status is None
+    assert result[0]["title"] == slides[0]["title"]
+    assert result[1]["title"] == slides[1]["title"]
+    assert result[2]["title"] == "生成タイトル"
+    assert "title" not in result[3]
+    assert ready == [(2, "生成タイトル")]
+    assert model.call_count == 1
+
+
+def test_apply_ai_titles_without_model_returns_skip_message() -> None:
+    """モデル未ロード時はスキップ理由を返す。"""
+    slides = [{"type": "content", "title": "T", "points": ["a"]}]
+    llm_mode.reset_model_cache()
+    with patch.object(llm_mode, "load_model", return_value=None):
+        result, status = llm_mode.apply_ai_titles(slides)
+    assert status == "モデル未検出のためAIタイトル生成をスキップしました"
+    assert result[0]["title"] == "T"
+
+
+def test_generate_title_from_slide_uses_body_context() -> None:
+    """本文要点を含むプロンプトでタイトルを生成する。"""
+    model = _MockModel("消費動向")
+    slide = {"type": "content", "title": "長い旧タイトル", "points": ["消費は底堅い"]}
+    title = llm_mode.generate_title_from_slide(model, slide)
+    assert title == "消費動向"
+    assert "本文の要点" in model.last_messages[1]["content"]
+
+
 def test_threshold_constants_match_spec() -> None:
     """schema 定数が SPEC と一致する。"""
     assert len(_LONG_CONTENT_TITLE) > schema.TITLE_SHORTEN_THRESHOLD

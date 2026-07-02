@@ -14,10 +14,11 @@ import tkinter as tk
 import tkinter.font as tkfont
 
 import json_builder
+import llm_mode
 import renderer
+import slide_sync
 import ui_theme
 import validator
-from llm_mode import LlmModeNotImplementedError
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -67,20 +68,24 @@ class SlideMakerApp:
         self.root.title(APP_TITLE)
         self.root.minsize(ui_theme.MIN_WINDOW_WIDTH, ui_theme.MIN_WINDOW_HEIGHT)
         self.root.geometry(ui_theme.DEFAULT_GEOMETRY)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._pdf_path = tk.StringVar()
         self._cover_title = tk.StringVar()
         self._output_dir = tk.StringVar()
-        self._mode = tk.StringVar(value="rule")
-        self._use_llm_title_fix = tk.BooleanVar(value=False)
+        self._use_ai_titles = tk.BooleanVar(value=False)
         self._status = tk.StringVar(value="準備完了")
         self._busy = False
+        self._current_slide_data: list[dict] | None = None
+        self._title_vars: dict[int, tk.StringVar] = {}
+        self._llm_model_ready = False
 
         self._style = ui_theme.apply_theme(root, font_family=font_family)
         self._build_ui()
+        self._start_llm_preload()
 
     def _build_ui(self) -> None:
-        """UI コンポーネントを構築する（操作領域を固定し、JSON領域だけ伸縮）。"""
+        """UI コンポーネントを構築する。"""
         self.root.grid_rowconfigure(0, weight=0)
         self.root.grid_rowconfigure(1, weight=1, minsize=360)
         self.root.grid_rowconfigure(2, weight=0)
@@ -91,7 +96,7 @@ class SlideMakerApp:
         self._build_footer()
 
     def _build_header(self) -> None:
-        """トップバー（濃緑）。"""
+        """トップバー（濃緑）+ 右上 LLM 状態バナー。"""
         header = tk.Frame(self.root, bg=ui_theme.GREEN_DEEP, padx=28, pady=18)
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(0, weight=1)
@@ -103,8 +108,19 @@ class SlideMakerApp:
             style="HeaderSub.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
+        self._llm_banner = tk.Label(
+            header,
+            text="AIモデルを起動中・・・",
+            bg=ui_theme.BANNER_LOADING_BG,
+            fg=ui_theme.BANNER_TEXT,
+            font=(self._font_family, 10),
+            padx=12,
+            pady=4,
+        )
+        self._llm_banner.grid(row=0, column=1, rowspan=2, sticky="ne", padx=(16, 0))
+
     def _build_body(self) -> None:
-        """入力カード + JSON エディタ（中央のみ伸縮）。"""
+        """入力カード + JSON / AI タイトル（横分割）。"""
         body = ttk.Frame(self.root, padding=(22, 18))
         body.grid(row=1, column=0, sticky="nsew")
         body.grid_rowconfigure(0, weight=0)
@@ -155,29 +171,35 @@ class SlideMakerApp:
             textvariable=self._cover_title,
         )
 
-        mode_row = ttk.Frame(card, style="Card.TFrame")
-        mode_row.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-        ttk.Label(mode_row, text="②", style="Step.TLabel").pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(mode_row, text="モード", style="Card.TLabel").pack(side=tk.LEFT, padx=(0, 16))
-        ttk.Radiobutton(mode_row, text="ルールベース", variable=self._mode, value="rule").pack(side=tk.LEFT, padx=4)
-        ttk.Radiobutton(mode_row, text="LLM", variable=self._mode, value="llm").pack(side=tk.LEFT, padx=(12, 4))
+        action_row = ttk.Frame(card, style="Card.TFrame")
+        action_row.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        ttk.Label(action_row, text="②", style="Step.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(action_row, text="ルールベース → 作成", style="Card.TLabel").pack(side=tk.LEFT, padx=(0, 16))
         self._btn_json = ttk.Button(
-            mode_row, text="JSON 生成", style="Accent.TButton", command=self._on_generate_json,
+            action_row, text="JSON 生成", style="Accent.TButton", command=self._on_generate_json,
         )
-        self._btn_json.pack(side=tk.LEFT, padx=(24, 0))
+        self._btn_json.pack(side=tk.LEFT, padx=(8, 0))
 
         llm_row = ttk.Frame(card, style="Card.TFrame")
         llm_row.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         ttk.Checkbutton(
             llm_row,
-            text="LLMでタイトルを整える（実験的・下書き補助）",
-            variable=self._use_llm_title_fix,
+            text="各スライドのタイトル名をAIモデルで作成",
+            variable=self._use_ai_titles,
         ).pack(side=tk.LEFT)
         ttk.Label(
             llm_row,
-            text="model/gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf 配置時のみ有効。長い content/table タイトルを短縮します。",
+            text="model/gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf 配置時のみ有効",
             style="CardMuted.TLabel",
         ).pack(side=tk.LEFT, padx=(12, 0))
+
+        self._progress_frame = ttk.Frame(card, style="Card.TFrame")
+        self._progress_frame.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._progress_label = ttk.Label(self._progress_frame, text="", style="CardMuted.TLabel")
+        self._progress_label.pack(anchor="w")
+        self._progress_bar = ttk.Progressbar(self._progress_frame, mode="determinate", maximum=100)
+        self._progress_bar.pack(fill=tk.X, pady=(4, 0))
+        self._progress_frame.grid_remove()
 
     def _add_labeled_entry(
         self,
@@ -190,53 +212,52 @@ class SlideMakerApp:
     ) -> None:
         """固定4列のラベル + Entry 行。"""
         ttk.Label(parent, text=step, style="Step.TLabel").grid(row=row, column=0, sticky="w", pady=6)
-
         ttk.Label(parent, text=label, style="Card.TLabel").grid(
             row=row, column=1, sticky="w", padx=(0, 14), pady=6,
         )
-        entry = ttk.Entry(parent, textvariable=textvariable)
-        entry.grid(row=row, column=2, sticky="ew", pady=6)
+        ttk.Entry(parent, textvariable=textvariable).grid(row=row, column=2, sticky="ew", pady=6)
 
     def _build_json_section(self, card: ttk.Frame) -> None:
-        """ステップ③④ JSON エディタ。"""
+        """ステップ③④ — JSON構造 + AIモデルによるタイトル（横分割）。"""
         card.grid_rowconfigure(2, weight=1, minsize=220)
-        card.grid_columnconfigure(0, weight=1)
+        card.grid_columnconfigure(0, weight=3)
+        card.grid_columnconfigure(1, weight=2)
 
         header_row = ttk.Frame(card, style="Card.TFrame")
-        header_row.grid(row=0, column=0, sticky="ew")
+        header_row.grid(row=0, column=0, columnspan=2, sticky="ew")
         ttk.Label(header_row, text="③④", style="Step.TLabel").pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(
-            header_row,
-            text="slideData JSON（編集可）",
-            style="Section.TLabel",
-        ).pack(side=tk.LEFT)
+        ttk.Label(header_row, text="slideData（編集可）", style="Section.TLabel").pack(side=tk.LEFT)
 
         self._draft_label = ttk.Label(
             card,
             text=(
                 "これは下書きです。タイトルや文言は、下のJSONを直接編集して仕上げてください。"
-                "特に表紙タイトルと各スライドのタイトルは、内容に合わせて浄書することをおすすめします。"
+                "右側のAIタイトル欄を編集した場合も、検証・スライド作成時に反映されます。"
             ),
             style="CardMuted.TLabel",
             wraplength=900,
             justify=tk.LEFT,
         )
-        self._draft_label.grid(row=1, column=0, sticky="ew", pady=(8, 6))
+        self._draft_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 6))
 
-        text_frame = tk.Frame(
+        # 左: JSON構造
+        json_outer = tk.Frame(
             card,
             bg=ui_theme.WHITE,
             highlightbackground=ui_theme.BORDER,
             highlightthickness=1,
         )
-        text_frame.grid(row=2, column=0, sticky="nsew")
-        text_frame.grid_rowconfigure(0, weight=1)
-        text_frame.grid_columnconfigure(0, weight=1)
+        json_outer.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
+        json_outer.grid_rowconfigure(1, weight=1)
+        json_outer.grid_columnconfigure(0, weight=1)
 
+        ttk.Label(json_outer, text="JSON構造", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(6, 4),
+        )
         self._json_text = scrolledtext.ScrolledText(
-            text_frame,
+            json_outer,
             wrap=tk.WORD,
-            font=("Consolas", 12),
+            font=("Consolas", 11),
             bg=ui_theme.WHITE,
             fg=ui_theme.TEXT_MAIN,
             insertbackground=ui_theme.GREEN_EMERALD,
@@ -245,7 +266,46 @@ class SlideMakerApp:
             padx=8,
             pady=8,
         )
-        self._json_text.grid(row=0, column=0, sticky="nsew")
+        self._json_text.grid(row=1, column=0, sticky="nsew")
+
+        # 右: AIモデルによるタイトル
+        title_outer = tk.Frame(
+            card,
+            bg=ui_theme.WHITE,
+            highlightbackground=ui_theme.BORDER,
+            highlightthickness=1,
+        )
+        title_outer.grid(row=2, column=1, sticky="nsew")
+        title_outer.grid_rowconfigure(1, weight=1)
+        title_outer.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(title_outer, text="AIモデルによるタイトル", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w", padx=8, pady=(6, 4),
+        )
+
+        title_scroll_frame = ttk.Frame(title_outer, style="Card.TFrame")
+        title_scroll_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        title_scroll_frame.grid_rowconfigure(0, weight=1)
+        title_scroll_frame.grid_columnconfigure(0, weight=1)
+
+        self._title_canvas = tk.Canvas(
+            title_scroll_frame,
+            bg=ui_theme.WHITE,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self._title_scrollbar = ttk.Scrollbar(title_scroll_frame, orient=tk.VERTICAL, command=self._title_canvas.yview)
+        self._title_inner = ttk.Frame(self._title_canvas, style="Card.TFrame")
+
+        self._title_inner.bind(
+            "<Configure>",
+            lambda _e: self._title_canvas.configure(scrollregion=self._title_canvas.bbox("all")),
+        )
+        self._title_canvas_window = self._title_canvas.create_window((0, 0), window=self._title_inner, anchor="nw")
+        self._title_canvas.configure(yscrollcommand=self._title_scrollbar.set)
+
+        self._title_canvas.grid(row=0, column=0, sticky="nsew")
+        self._title_scrollbar.grid(row=0, column=1, sticky="ns")
 
         card.bind("<Configure>", self._on_json_card_resize)
 
@@ -253,9 +313,11 @@ class SlideMakerApp:
         """下書きラベルの折り返し幅をカード幅に追従させる。"""
         wrap = max(400, event.width - 40)
         self._draft_label.configure(wraplength=wrap)
+        canvas_width = max(200, (event.width // 2) - 40)
+        self._title_canvas.itemconfig(self._title_canvas_window, width=canvas_width)
 
     def _build_footer(self) -> None:
-        """ステップ⑤ + アクションボタン + ステータスバー（常に表示）。"""
+        """ステップ⑤ + アクションボタン + ステータスバー。"""
         footer_wrap = tk.Frame(self.root, bg=ui_theme.APP_BG)
         footer_wrap.grid(row=2, column=0, sticky="ew")
         footer_wrap.grid_columnconfigure(0, weight=1)
@@ -295,6 +357,98 @@ class SlideMakerApp:
         ttk.Label(status_bar, text="状態:", style="Status.TLabel").pack(side=tk.LEFT)
         ttk.Label(status_bar, textvariable=self._status, style="StatusValue.TLabel").pack(side=tk.LEFT, padx=(6, 0))
 
+    def _set_llm_banner(self, state: str) -> None:
+        """右上 LLM 状態バナーを更新する。"""
+        if state == "loading":
+            self._llm_banner.configure(
+                text="AIモデルを起動中・・・",
+                bg=ui_theme.BANNER_LOADING_BG,
+            )
+        elif state == "ready":
+            self._llm_banner.configure(
+                text="AIモデル起動完了",
+                bg=ui_theme.BANNER_READY_BG,
+            )
+            self._llm_model_ready = True
+        else:
+            self._llm_banner.configure(
+                text="AIモデル未起動（ルールベースのみ）",
+                bg=ui_theme.BANNER_WARN_BG,
+            )
+            self._llm_model_ready = False
+
+    def _start_llm_preload(self) -> None:
+        """起動直後に LLM をバックグラウンドでロードする。"""
+        self._set_llm_banner("loading")
+
+        def worker() -> None:
+            model = llm_mode.load_model()
+            state = "ready" if model is not None else "failed"
+            self.root.after(0, lambda: self._set_llm_banner(state))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_progress(self, current: int, total: int, message: str) -> None:
+        """AI 処理中プログレスバーを表示する。"""
+        if total <= 0:
+            self._hide_progress()
+            return
+        self._progress_frame.grid()
+        pct = int(current / total * 100)
+        self._progress_bar["value"] = pct
+        self._progress_label.configure(text=f"{message}{current}/{total}件")
+
+    def _hide_progress(self) -> None:
+        """プログレスバーを非表示にする。"""
+        self._progress_frame.grid_remove()
+        self._progress_bar["value"] = 0
+        self._progress_label.configure(text="")
+
+    def _rebuild_title_entries(self, slide_data: list[dict]) -> None:
+        """AI タイトル Entry リストを slideData から再構築する。"""
+        for child in self._title_inner.winfo_children():
+            child.destroy()
+        self._title_vars.clear()
+
+        for index, slide in enumerate(slide_data):
+            if not slide_sync.should_get_ai_title(slide):
+                continue
+            row = ttk.Frame(self._title_inner, style="Card.TFrame")
+            row.pack(fill=tk.X, pady=3, padx=4)
+            ttk.Label(row, text=f"スライド{index + 1}", style="Card.TLabel", width=10).pack(
+                side=tk.LEFT, padx=(0, 6),
+            )
+            var = tk.StringVar(value=str(slide.get("title", "")))
+            self._title_vars[index] = var
+            ttk.Entry(row, textvariable=var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def _refresh_json_from_data(self) -> None:
+        """内部 slideData から JSON エディタを更新する。"""
+        if self._current_slide_data is None:
+            return
+        text = json.dumps(self._current_slide_data, ensure_ascii=False, indent=2)
+        self._json_text.delete("1.0", tk.END)
+        self._json_text.insert(tk.END, text)
+
+    def _merge_title_entries_into_data(
+        self,
+        slide_data: list[dict],
+    ) -> list[dict]:
+        """Entry 欄の最新タイトルを slideData に反映する。"""
+        titles = {index: var.get() for index, var in self._title_vars.items()}
+        return slide_sync.merge_ai_titles_into_slides(slide_data, titles)
+
+    def _parse_json_with_titles(
+        self,
+    ) -> tuple[list[dict] | None, list[str], list[str]]:
+        """JSON をパースし、AI タイトル Entry を反映した slideData を返す。"""
+        text = self._json_text.get("1.0", tk.END)
+        data, errors, warnings = validator.validate_json_text(text)
+        if errors or data is None:
+            return None, errors, warnings
+        merged = self._merge_title_entries_into_data(data)
+        return merged, [], warnings
+
     def _set_busy(self, busy: bool, status: str = "") -> None:
         """処理中フラグとボタン状態を切り替える。"""
         self._busy = busy
@@ -323,6 +477,14 @@ class SlideMakerApp:
         if path:
             self._output_dir.set(path)
 
+    def _on_title_ready(self, slide_index: int, title: str) -> None:
+        """AI タイトル1件完了時に Entry と JSON を更新する。"""
+        if slide_index in self._title_vars:
+            self._title_vars[slide_index].set(title)
+        if self._current_slide_data and slide_index < len(self._current_slide_data):
+            self._current_slide_data[slide_index]["title"] = title
+            self._refresh_json_from_data()
+
     def _on_generate_json(self) -> None:
         """PDF から JSON を生成する。"""
         pdf = self._pdf_path.get().strip()
@@ -333,52 +495,54 @@ class SlideMakerApp:
             messagebox.showerror("エラー", f"PDF が見つかりません:\n{pdf}")
             return
 
-        mode = self._mode.get()
         cover_title = self._cover_title.get().strip()
-        use_llm_title_fix = self._use_llm_title_fix.get() and mode == "rule"
+        use_ai = self._use_ai_titles.get()
         self._set_busy(True, "JSON生成中...")
+        if use_ai:
+            self._show_progress(0, 1, "AIにより処理中・・・")
 
         def progress_callback(current: int, total: int, message: str) -> None:
-            self.root.after(
-                0,
-                lambda c=current, t=total, m=message: self._status.set(f"{m} ({c}/{t})"),
-            )
+            self.root.after(0, lambda: self._show_progress(current, total, message))
+
+        def title_ready_callback(slide_index: int, title: str) -> None:
+            self.root.after(0, lambda: self._on_title_ready(slide_index, title))
 
         def worker() -> None:
             try:
+                model = llm_mode.load_model() if use_ai else None
                 data, llm_note = json_builder.build_from_pdf(
                     pdf,
-                    mode=mode,  # type: ignore[arg-type]
                     cover_title=cover_title or None,
-                    use_llm_title_fix=use_llm_title_fix,
-                    progress_callback=progress_callback if use_llm_title_fix else None,
+                    use_ai_titles=use_ai,
+                    progress_callback=progress_callback if use_ai else None,
+                    title_ready_callback=title_ready_callback if use_ai else None,
+                    model=model,
                 )
-                text = json.dumps(data, ensure_ascii=False, indent=2)
                 finish_status = llm_note or "JSON生成完了"
-                self.root.after(0, lambda: self._finish_json_ok(text, finish_status))
-            except LlmModeNotImplementedError as exc:
-                self.root.after(0, lambda: self._finish_error(str(exc)))
+                self.root.after(0, lambda: self._finish_json_ok(data, finish_status))
             except Exception as exc:
                 logger.exception("JSON 生成エラー")
                 self.root.after(0, lambda: self._finish_error(f"JSON 生成エラー: {exc}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_json_ok(self, text: str, status: str = "JSON生成完了") -> None:
+    def _finish_json_ok(self, data: list[dict], status: str = "JSON生成完了") -> None:
         """JSON 生成成功時の UI 更新。"""
-        self._json_text.delete("1.0", tk.END)
-        self._json_text.insert(tk.END, text)
+        self._current_slide_data = data
+        self._rebuild_title_entries(data)
+        self._refresh_json_from_data()
+        self._hide_progress()
         self._set_busy(False, status)
 
     def _finish_error(self, msg: str) -> None:
         """エラー時の UI 更新。"""
+        self._hide_progress()
         self._set_busy(False, "エラー")
         messagebox.showerror("エラー", msg)
 
     def _on_validate(self) -> None:
-        """JSON を検証する。"""
-        text = self._json_text.get("1.0", tk.END)
-        data, errors, warnings = validator.validate_json_text(text)
+        """JSON を検証する（AI タイトル Entry を反映後）。"""
+        data, errors, warnings = self._parse_json_with_titles()
         if errors:
             messagebox.showwarning(
                 "検証失敗",
@@ -398,9 +562,8 @@ class SlideMakerApp:
             self._status.set("検証成功")
 
     def _on_build_pptx(self) -> None:
-        """PPTX を生成する。"""
-        text = self._json_text.get("1.0", tk.END)
-        data, errors, warnings = validator.validate_json_text(text)
+        """PPTX を生成する（AI タイトル Entry を反映後）。"""
+        data, errors, warnings = self._parse_json_with_titles()
         if errors:
             messagebox.showerror(
                 "検証エラー",
@@ -442,6 +605,11 @@ class SlideMakerApp:
         """PPTX 生成成功時の UI 更新。"""
         self._set_busy(False, "完了")
         messagebox.showinfo("完了", f"スライドを作成しました:\n{out_path}")
+
+    def _on_close(self) -> None:
+        """アプリ終了時に LLM を解放する。"""
+        llm_mode.unload_model()
+        self.root.destroy()
 
 
 def run_app() -> None:

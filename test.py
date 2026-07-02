@@ -12,7 +12,6 @@ import llm_mode
 import renderer
 import rule_mode
 import validator
-from llm_mode import LlmModeNotImplementedError
 from utils import parse_number
 
 # ---------------------------------------------------------------------------
@@ -97,16 +96,20 @@ def test_user_full_workflow_validate_then_build() -> None:
 
 
 # ---------------------------------------------------------------------------
-# シナリオ5: ユーザーが LLM モードを選ぶ → スタブエラー
+# シナリオ5: AI タイトル対象の判定
 # ---------------------------------------------------------------------------
 
-def test_user_selects_llm_mode_gets_stub_error() -> None:
-    """LLM モードは未実装エラーを返す。"""
-    try:
-        llm_mode.build_slide_data("text")
-        raise AssertionError("expected LlmModeNotImplementedError")
-    except LlmModeNotImplementedError:
-        pass
+def test_user_ai_title_targets_exclude_cover() -> None:
+    """表紙・章扉は AI タイトル対象外、content/table は対象。"""
+    import slide_sync
+
+    slides = [
+        {"type": "title", "title": "表紙", "date": "2026.01.01"},
+        {"type": "content", "title": "A", "points": ["p"]},
+        {"type": "table", "title": "B", "headers": ["h"], "rows": [["v"]]},
+    ]
+    targets = slide_sync.list_ai_title_target_indices(slides)
+    assert targets == [1, 2]
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +332,7 @@ def run_all() -> int:
         test_user_rule_mode_generates_kpi_from_business_text,
         test_user_edits_json_with_forbidden_arrow,
         test_user_full_workflow_validate_then_build,
-        test_user_selects_llm_mode_gets_stub_error,
+        test_user_ai_title_targets_exclude_cover,
         test_user_table_edit_column_mismatch_message,
         test_user_business_number_formats,
         test_user_markdown_table_to_slide_data,

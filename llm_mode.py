@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import gc
 import logging
 import os
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import schema
+import slide_sync
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,14 @@ _model_load_attempted = False
 _SYSTEM_PROMPT = (
     "あなたは日本語の見出しを短くする編集者です。"
     "タイトルと本文の要点から、このスライド全体の主題を表す、"
+    "15文字以内の簡潔な見出しだけを出力してください。"
+    "説明・記号・カギ括弧・句点は付けないでください。"
+    "見出し以外は一切出力しないでください。"
+)
+
+_SYSTEM_PROMPT_GENERATE = (
+    "あなたは日本語のプレゼン資料編集者です。"
+    "スライド本文の要点から、そのスライド全体の主題を表す、"
     "15文字以内の簡潔な見出しだけを出力してください。"
     "説明・記号・カギ括弧・句点は付けないでください。"
     "見出し以外は一切出力しないでください。"
@@ -176,6 +186,22 @@ def reset_model_cache() -> None:
     _model_load_attempted = False
 
 
+def unload_model() -> None:
+    """ロード済み LLM を解放する（アプリ終了時）。"""
+    global _cached_model, _model_load_attempted
+    if _cached_model is not None:
+        close_fn = getattr(_cached_model, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception as exc:
+                logger.warning("LLM model close failed: %s", exc)
+        _cached_model = None
+    _model_load_attempted = False
+    gc.collect()
+    logger.info("LLM model unloaded")
+
+
 def _sanitize_llm_title(text: str) -> str:
     """LLM 出力を見出し用に正規化する。"""
     cleaned = text.strip()
@@ -187,6 +213,17 @@ def _sanitize_llm_title(text: str) -> str:
     for symbol in schema.FORBIDDEN_SYMBOLS:
         cleaned = cleaned.replace(symbol, "")
     return cleaned.strip()
+
+
+def _is_valid_generated_title(candidate: str) -> bool:
+    """AI 生成タイトルが採用可能かどうか。"""
+    if not candidate or len(candidate) <= 1:
+        return False
+    if len(candidate) > schema.TITLE_SHORTEN_MAX:
+        return False
+    if _INSTRUCTION_ECHO_RE.search(candidate) and len(candidate) <= 8:
+        return False
+    return True
 
 
 def _is_valid_shortened_title(original: str, candidate: str) -> bool:
@@ -246,9 +283,8 @@ def _build_user_prompt(original_title: str, slide_context: str = "") -> tuple[st
     return _SYSTEM_PROMPT_TITLE_ONLY, user_prompt
 
 
-def _call_llm(model: Any, original_title: str, *, slide_context: str = "") -> str:
-    """モデルに1件のタイトル短縮を依頼する。"""
-    system_prompt, user_prompt = _build_user_prompt(original_title, slide_context)
+def _call_llm_raw(model: Any, system_prompt: str, user_prompt: str) -> str:
+    """モデルに chat completion を1回依頼する。"""
 
     def _generate() -> str:
         response = model.create_chat_completion(
@@ -270,8 +306,48 @@ def _call_llm(model: Any, original_title: str, *, slide_context: str = "") -> st
         try:
             return future.result(timeout=schema.LLM_TIMEOUT_SEC)
         except concurrent.futures.TimeoutError:
-            logger.warning("LLM timeout for title: %s", original_title[:40])
+            logger.warning("LLM timeout")
             raise
+
+
+def _call_llm(model: Any, original_title: str, *, slide_context: str = "") -> str:
+    """モデルに1件のタイトル短縮を依頼する。"""
+    system_prompt, user_prompt = _build_user_prompt(original_title, slide_context)
+
+    try:
+        return _call_llm_raw(model, system_prompt, user_prompt)
+    except Exception:
+        raise
+
+
+def generate_title_from_slide(model: Any | None, slide: dict[str, Any]) -> str:
+    """スライド本文から AI タイトルを1件生成する。失敗時は元タイトルを返す。"""
+    fallback = str(slide.get("title", ""))
+    if model is None:
+        return fallback
+
+    slide_context = _build_slide_context(slide)
+    if not slide_context.strip():
+        slide_context = fallback
+
+    user_prompt = (
+        "次のスライド内容にふさわしい、15文字以内の見出しを作ってください。\n"
+        "本文の要点:\n"
+        f"{slide_context}\n"
+        "見出し:"
+    )
+    try:
+        raw = _call_llm_raw(model, _SYSTEM_PROMPT_GENERATE, user_prompt)
+    except Exception as exc:
+        logger.warning("LLM generate failed: %s", exc)
+        return fallback
+
+    candidate = _sanitize_llm_title(raw)
+    if _is_valid_generated_title(candidate):
+        return candidate
+
+    logger.info("LLM generate rejected, fallback: %r -> %r", fallback[:40], raw[:40])
+    return fallback
 
 
 def shorten_title(
@@ -311,6 +387,45 @@ def _should_fix_slide(slide: dict[str, Any]) -> bool:
         return False
     title = str(slide.get("title", ""))
     return len(title) > schema.TITLE_SHORTEN_THRESHOLD
+
+
+def apply_ai_titles(
+    slide_data: list[dict[str, Any]],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    title_ready_callback: Callable[[int, str], None] | None = None,
+    model: Any | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """slideData の各本文スライドに AI タイトルを生成する。
+
+    Returns:
+        (新しい slideData, スキップ理由メッセージ or None)
+    """
+    result = deepcopy(slide_data)
+    targets = slide_sync.list_ai_title_target_indices(result)
+    if not targets:
+        return result, None
+
+    if model is None:
+        model = load_model()
+    if model is None:
+        return result, "モデル未検出のためAIタイトル生成をスキップしました"
+
+    total = len(targets)
+    for step, index in enumerate(targets, start=1):
+        slide = result[index]
+        original = str(slide.get("title", ""))
+        try:
+            slide["title"] = generate_title_from_slide(model, slide)
+        except Exception as exc:
+            logger.warning("apply_ai_titles slide=%d failed: %s", index, exc)
+            slide["title"] = original
+        if title_ready_callback is not None:
+            title_ready_callback(index, str(slide.get("title", "")))
+        if progress_callback is not None:
+            progress_callback(step, total, "AIにより処理中・・・")
+
+    return result, None
 
 
 def apply_title_fix(
