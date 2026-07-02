@@ -226,11 +226,9 @@ def test_build_llama_load_kwargs_low_memory() -> None:
     assert kwargs["n_ctx"] == schema.LLM_N_CTX
     assert kwargs["n_threads"] == schema.LLM_N_THREADS
     assert kwargs["n_batch"] == schema.LLM_N_BATCH
-    assert kwargs["n_ubatch"] == schema.LLM_N_UBATCH
     assert kwargs["n_gpu_layers"] == schema.LLM_N_GPU_LAYERS
-    assert kwargs["type_k"] == schema.LLM_KV_CACHE_TYPE
-    assert kwargs["type_v"] == schema.LLM_KV_CACHE_TYPE
     assert kwargs["verbose"] is False
+    assert "type_k" not in kwargs
 
 
 def test_load_model_uses_low_memory_kwargs(tmp_path, monkeypatch) -> None:

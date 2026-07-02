@@ -110,13 +110,10 @@ def build_llama_load_kwargs(model_path: str | Path) -> dict[str, Any]:
     """低メモリ llama-cpp-python ロード引数を返す（Glaux 節約設定準拠）。"""
     return {
         "model_path": str(model_path),
-        "n_ctx": schema.LLM_N_CTX,
-        "n_threads": schema.LLM_N_THREADS,
-        "n_batch": schema.LLM_N_BATCH,
-        "n_ubatch": schema.LLM_N_UBATCH,
-        "n_gpu_layers": schema.LLM_N_GPU_LAYERS,
-        "type_k": schema.LLM_KV_CACHE_TYPE,
-        "type_v": schema.LLM_KV_CACHE_TYPE,
+        "n_ctx": int(schema.LLM_N_CTX),
+        "n_threads": int(schema.LLM_N_THREADS),
+        "n_batch": int(schema.LLM_N_BATCH),
+        "n_gpu_layers": int(schema.LLM_N_GPU_LAYERS),
         "verbose": False,
     }
 
