@@ -15,6 +15,11 @@ AI_TITLE_ELIGIBLE_TYPES = frozenset({
     "barCompare",
     "compare",
     "agenda",
+    "process",
+    "timeline",
+    "cycle",
+    "pyramid",
+    "triangle",
 })
 
 

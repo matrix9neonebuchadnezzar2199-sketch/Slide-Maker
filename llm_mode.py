@@ -59,6 +59,27 @@ _SYSTEM_PROMPT_TITLE_ONLY = (
     "見出し以外は一切出力しないでください。"
 )
 
+_SYSTEM_PROMPT_SUBHEAD = (
+    "あなたは日本語のプレゼン資料編集者です。"
+    "スライドタイトルと本文要点から、全角50文字以内の小見出しを1行だけ出力してください。"
+    "説明・記号・句点は付けないでください。小見出し以外は出力しないでください。"
+)
+
+_SYSTEM_PROMPT_NOTES = (
+    "あなたはプレゼン原稿を書く編集者です。"
+    "スライド内容に基づき、発表者が話す原稿を2〜3文のプレーンテキストで出力してください。"
+    "マークダウン記法（**太字**、[[強調]]等）は使わないでください。"
+)
+
+_SYSTEM_PROMPT_RECLASSIFY = (
+    "あなたはスライドレイアウト選定者です。"
+    "与えられた箇条書きに最適な表現を1語だけ選び、"
+    "timeline / process / cycle / pyramid / content のいずれか1語のみ出力してください。"
+)
+
+_RECLASSIFY_ALLOWED = frozenset({"timeline", "process", "cycle", "pyramid", "content"})
+_NOTES_MARKUP_RE = re.compile(r"\*\*([^*]+)\*\*|\[\[([^\]]+)\]\]")
+
 
 class LlmModeNotImplementedError(Exception):
     """LLM 全文生成モードが未実装であることを示す。"""
@@ -361,6 +382,22 @@ def _build_slide_context(slide: dict[str, Any]) -> str:
         rows = slide.get("rows", [])
         if rows:
             parts.append(" / ".join(str(cell).strip() for cell in rows[0] if str(cell).strip()))
+    elif slide_type == "process":
+        parts.extend(str(step).strip() for step in slide.get("steps", [])[: schema.LLM_TITLE_CONTEXT_POINTS])
+    elif slide_type == "timeline":
+        for milestone in slide.get("milestones", [])[: schema.LLM_TITLE_CONTEXT_POINTS]:
+            if isinstance(milestone, dict):
+                parts.append(str(milestone.get("label", "")).strip())
+    elif slide_type in ("cycle", "triangle"):
+        for item in slide.get("items", [])[: schema.LLM_TITLE_CONTEXT_POINTS]:
+            if isinstance(item, str):
+                parts.append(item.strip())
+            elif isinstance(item, dict):
+                parts.append(str(item.get("label") or item.get("title") or "").strip())
+    elif slide_type == "pyramid":
+        for level in slide.get("levels", [])[: schema.LLM_TITLE_CONTEXT_POINTS]:
+            if isinstance(level, dict):
+                parts.append(str(level.get("title", "")).strip())
 
     context = "\n".join(parts)
     if len(context) > schema.LLM_TITLE_CONTEXT_MAX_CHARS:
@@ -541,6 +578,313 @@ def apply_ai_titles(
             progress_callback(step, total, "AIにより処理中・・・")
 
     return result, None
+
+
+def _strip_notes_markup(text: str) -> str:
+    """notes 用マークアップを除去する（魔人式 7.0 準拠）。"""
+    cleaned = _NOTES_MARKUP_RE.sub(lambda m: m.group(1) or m.group(2) or "", text)
+    for ch in ("*", "[", "]", "_", "~", "`"):
+        cleaned = cleaned.replace(ch, "")
+    return cleaned.strip()
+
+
+def _is_valid_subhead(candidate: str) -> bool:
+    """小見出しが採用可能かどうか。"""
+    if not candidate or len(candidate) <= 1:
+        return False
+    if len(candidate) > schema.LLM_SUBHEAD_MAX_CHARS:
+        return False
+    if _INSTRUCTION_ECHO_RE.search(candidate) and len(candidate) <= 10:
+        return False
+    return True
+
+
+def _is_valid_notes(candidate: str) -> bool:
+    """スピーカーノートが採用可能かどうか。"""
+    if not candidate or len(candidate) < 8:
+        return False
+    for markup in schema.NOTES_FORBIDDEN_MARKUP:
+        if markup in candidate:
+            return False
+    return True
+
+
+def _call_llm_with_tokens(
+    model: Any,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    max_tokens: int,
+) -> str:
+    """max_tokens を指定して LLM を1回呼ぶ。"""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    kwargs = {
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": schema.LLM_TEMPERATURE,
+        "top_p": 0.9,
+        "stop": ["\n\n"],
+    }
+    if llama_server is not None and isinstance(model, llama_server.LlamaServerClient):
+        response = model.create_chat_completion(**kwargs)
+        return _extract_assistant_text(response)
+
+    def _generate() -> str:
+        response = model.create_chat_completion(**kwargs)
+        return _extract_assistant_text(response)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_generate)
+        return future.result(timeout=schema.LLM_TIMEOUT_SEC)
+
+
+def generate_subhead_from_slide(model: Any | None, slide: dict[str, Any]) -> str:
+    """スライドから小見出しを1件生成する。失敗時は空文字。"""
+    if model is None or slide.get("subhead"):
+        return str(slide.get("subhead", ""))
+
+    context = _build_slide_context(slide)
+    title = str(slide.get("title", ""))
+    user_prompt = (
+        "次のスライドにふさわしい小見出しを作ってください。\n"
+        f"タイトル: {title}\n"
+        f"本文要点:\n{context or title}\n"
+        "小見出し:"
+    )
+    try:
+        raw = _call_llm_with_tokens(
+            model, _SYSTEM_PROMPT_SUBHEAD, user_prompt,
+            max_tokens=schema.LLM_SUBHEAD_MAX_TOKENS,
+        )
+    except Exception as exc:
+        logger.warning("LLM subhead failed: %s", exc)
+        return ""
+
+    candidate = _sanitize_llm_title(raw)
+    if _is_valid_subhead(candidate):
+        return candidate
+    return ""
+
+
+def generate_notes_from_slide(model: Any | None, slide: dict[str, Any]) -> str:
+    """スライドからスピーカーノートを生成する。失敗時は空文字。"""
+    if model is None or slide.get("notes"):
+        return str(slide.get("notes", ""))
+
+    context = _build_slide_context(slide)
+    title = str(slide.get("title", ""))
+    user_prompt = (
+        "次のスライドの発表原稿を書いてください。\n"
+        f"タイトル: {title}\n"
+        f"内容:\n{context or title}\n"
+        "原稿:"
+    )
+    try:
+        raw = _call_llm_with_tokens(
+            model, _SYSTEM_PROMPT_NOTES, user_prompt,
+            max_tokens=schema.LLM_NOTES_MAX_TOKENS,
+        )
+    except Exception as exc:
+        logger.warning("LLM notes failed: %s", exc)
+        return ""
+
+    candidate = _strip_notes_markup(raw.replace("\n", " ").strip())
+    if _is_valid_notes(candidate):
+        return candidate
+    return ""
+
+
+def _classify_content_slide(model: Any, slide: dict[str, Any]) -> str:
+    """content スライドの最適パターンを1語で分類する。"""
+    points = slide.get("points") or []
+    if not isinstance(points, list) or len(points) < 2:
+        return "content"
+
+    bullet_text = "\n".join(f"- {str(p)}" for p in points[:6])
+    user_prompt = (
+        "次の箇条書きに最適な表現を1語だけ選んでください。\n"
+        f"{bullet_text}\n"
+        "回答:"
+    )
+    try:
+        raw = _call_llm_with_tokens(
+            model, _SYSTEM_PROMPT_RECLASSIFY, user_prompt,
+            max_tokens=schema.LLM_RECLASSIFY_MAX_TOKENS,
+        )
+    except Exception as exc:
+        logger.warning("LLM reclassify failed: %s", exc)
+        return "content"
+
+    answer = raw.strip().lower().split()[0] if raw.strip() else "content"
+    answer = answer.strip(".,。、")
+    if answer in _RECLASSIFY_ALLOWED:
+        return answer
+    return "content"
+
+
+def _transform_content_slide(slide: dict[str, Any], target_type: str) -> dict[str, Any]:
+    """content を専門パターンへ構造変換する（Python 側）。"""
+    if target_type == "content":
+        return slide
+
+    points = [str(p).strip() for p in (slide.get("points") or []) if str(p).strip()]
+    base = {key: value for key, value in slide.items() if key != "points"}
+
+    if target_type == "process" and 2 <= len(points) <= schema.MAX_COUNT["process"]:
+        return {**base, "type": "process", "steps": points[: schema.MAX_COUNT["process"]]}
+
+    if target_type == "timeline" and len(points) >= 2:
+        milestones = [
+            {"label": point[:30], "date": f"Phase {index + 1}"}
+            for index, point in enumerate(points[:8])
+        ]
+        return {**base, "type": "timeline", "milestones": milestones}
+
+    if target_type == "cycle" and len(points) == schema.FIXED_COUNT["cycle"]:
+        items = [{"label": point[:20]} for point in points]
+        return {**base, "type": "cycle", "items": items}
+
+    if target_type == "pyramid" and schema.MAX_COUNT["pyramid_levels_min"] <= len(points) <= schema.MAX_COUNT["pyramid_levels_max"]:
+        levels = [
+            {"title": point[:12], "description": point}
+            for point in points[: schema.MAX_COUNT["pyramid_levels_max"]]
+        ]
+        return {**base, "type": "pyramid", "levels": levels}
+
+    return slide
+
+
+def apply_pattern_reclassify(
+    slide_data: list[dict[str, Any]],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    model: Any | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """content スライドを LLM 分類 + Python 変換で専門パターンへ再配置する。"""
+    result = deepcopy(slide_data)
+    targets = [i for i, slide in enumerate(result) if slide.get("type") == "content" and slide.get("points")]
+    if not targets:
+        return result, None
+
+    if model is None:
+        model = load_model()
+    if model is None:
+        return result, "モデル未検出のためパターン再分類をスキップしました"
+
+    total = len(targets)
+    for step, index in enumerate(targets, start=1):
+        slide = result[index]
+        target_type = _classify_content_slide(model, slide)
+        result[index] = _transform_content_slide(slide, target_type)
+        if progress_callback is not None:
+            progress_callback(step, total, "パターン選定中...")
+
+    return result, None
+
+
+def apply_ai_subheads(
+    slide_data: list[dict[str, Any]],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    model: Any | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """各スライドに AI 小見出しを付与する。"""
+    result = deepcopy(slide_data)
+    targets = [
+        i for i, slide in enumerate(result)
+        if slide.get("type") not in _SKIP_TITLE_TYPES and not slide.get("subhead")
+    ]
+    if not targets:
+        return result, None
+
+    if model is None:
+        model = load_model()
+    if model is None:
+        return result, "モデル未検出のため小見出し生成をスキップしました"
+
+    total = len(targets)
+    for step, index in enumerate(targets, start=1):
+        subhead = generate_subhead_from_slide(model, result[index])
+        if subhead:
+            result[index]["subhead"] = subhead
+        if progress_callback is not None:
+            progress_callback(step, total, "小見出し生成中...")
+
+    return result, None
+
+
+def apply_ai_notes(
+    slide_data: list[dict[str, Any]],
+    *,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    model: Any | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """各スライドに AI スピーカーノートを付与する。"""
+    result = deepcopy(slide_data)
+    targets = [
+        i for i, slide in enumerate(result)
+        if slide.get("type") not in _SKIP_TITLE_TYPES and not slide.get("notes")
+    ]
+    if not targets:
+        return result, None
+
+    if model is None:
+        model = load_model()
+    if model is None:
+        return result, "モデル未検出のためノート生成をスキップしました"
+
+    total = len(targets)
+    for step, index in enumerate(targets, start=1):
+        notes = generate_notes_from_slide(model, result[index])
+        if notes:
+            result[index]["notes"] = notes
+        if progress_callback is not None:
+            progress_callback(step, total, "ノート生成中...")
+
+    return result, None
+
+
+def apply_ai_enhancements(
+    slide_data: list[dict[str, Any]],
+    *,
+    use_reclassify: bool = False,
+    use_subhead: bool = False,
+    use_notes: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    model: Any | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """タイトル以外の LLM 拡張（再分類→小見出し→ノート）を順に適用する。"""
+    result = deepcopy(slide_data)
+    skip_messages: list[str] = []
+
+    if model is None and (use_reclassify or use_subhead or use_notes):
+        model = load_model()
+
+    if use_reclassify:
+        result, msg = apply_pattern_reclassify(
+            result, progress_callback=progress_callback, model=model,
+        )
+        if msg:
+            skip_messages.append(msg)
+
+    if use_subhead:
+        result, msg = apply_ai_subheads(
+            result, progress_callback=progress_callback, model=model,
+        )
+        if msg:
+            skip_messages.append(msg)
+
+    if use_notes:
+        result, msg = apply_ai_notes(
+            result, progress_callback=progress_callback, model=model,
+        )
+        if msg:
+            skip_messages.append(msg)
+
+    return result, skip_messages
 
 
 def apply_title_fix(

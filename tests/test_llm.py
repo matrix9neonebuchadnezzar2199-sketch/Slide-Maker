@@ -321,3 +321,30 @@ def test_threshold_constants_match_spec() -> None:
     assert schema.LLM_DEFAULT_MODEL_NAME == "gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf"
     assert schema.LLM_N_CTX == 1000
     assert schema.LLM_N_THREADS == 2
+
+
+def test_generate_subhead_from_slide() -> None:
+    """小見出し生成の成功ケース。"""
+    model = _MockModel("市場動向の要点")
+    slide = {"type": "content", "title": "国内経済", "points": ["消費は底堅い"]}
+    subhead = llm_mode.generate_subhead_from_slide(model, slide)
+    assert subhead == "市場動向の要点"
+
+
+def test_generate_notes_strips_markup() -> None:
+    """notes からマークアップを除去する。"""
+    model = _MockModel("本日は**売上**と[[利益]]について説明します。")
+    slide = {"type": "content", "title": "KPI", "points": ["売上増"]}
+    notes = llm_mode.generate_notes_from_slide(model, slide)
+    assert "売上" in notes
+    assert "**" not in notes
+    assert "[[" not in notes
+
+
+def test_transform_content_to_process() -> None:
+    """再分類変換で process へ変換できる。"""
+    slide = {"type": "content", "title": "手順", "points": ["調査", "実装"]}
+    converted = llm_mode._transform_content_slide(slide, "process")
+    assert converted["type"] == "process"
+    assert converted["steps"] == ["調査", "実装"]
+

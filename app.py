@@ -74,6 +74,9 @@ class SlideMakerApp:
         self._cover_title = tk.StringVar()
         self._output_dir = tk.StringVar()
         self._use_ai_titles = tk.BooleanVar(value=False)
+        self._use_ai_reclassify = tk.BooleanVar(value=False)
+        self._use_ai_subhead = tk.BooleanVar(value=False)
+        self._use_ai_notes = tk.BooleanVar(value=False)
         self._status = tk.StringVar(value="準備完了")
         self._busy = False
         self._current_slide_data: list[dict] | None = None
@@ -84,7 +87,10 @@ class SlideMakerApp:
         self._style = ui_theme.apply_theme(root, font_family=font_family)
         self._build_ui()
         self._set_llm_banner("standby")
-        self._use_ai_titles.trace_add("write", self._on_ai_titles_toggle)
+        self._use_ai_titles.trace_add("write", self._on_ai_options_toggle)
+        self._use_ai_reclassify.trace_add("write", self._on_ai_options_toggle)
+        self._use_ai_subhead.trace_add("write", self._on_ai_options_toggle)
+        self._use_ai_notes.trace_add("write", self._on_ai_options_toggle)
 
     def _build_ui(self) -> None:
         """UI コンポーネントを構築する。"""
@@ -195,8 +201,26 @@ class SlideMakerApp:
             style="CardMuted.TLabel",
         ).pack(side=tk.LEFT, padx=(12, 0))
 
+        llm_row2 = ttk.Frame(card, style="Card.TFrame")
+        llm_row2.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Checkbutton(
+            llm_row2,
+            text="content を専門パターンへ再分類（実験的）",
+            variable=self._use_ai_reclassify,
+        ).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Checkbutton(
+            llm_row2,
+            text="小見出し（subhead）をAI生成",
+            variable=self._use_ai_subhead,
+        ).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Checkbutton(
+            llm_row2,
+            text="スピーカーノート（notes）をAI生成",
+            variable=self._use_ai_notes,
+        ).pack(side=tk.LEFT)
+
         self._progress_frame = ttk.Frame(card, style="Card.TFrame")
-        self._progress_frame.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        self._progress_frame.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         self._progress_label = ttk.Label(self._progress_frame, text="", style="CardMuted.TLabel")
         self._progress_label.pack(anchor="w")
         self._progress_bar = ttk.Progressbar(self._progress_frame, mode="determinate", maximum=100)
@@ -385,9 +409,21 @@ class SlideMakerApp:
             )
             self._llm_model_ready = False
 
-    def _on_ai_titles_toggle(self, *_args: object) -> None:
-        """AI タイトル利用時のみモデルを読み込む（Glaux 手動起動相当）。"""
-        if self._use_ai_titles.get():
+    def _needs_llm_preload(self) -> bool:
+        """AI 系オプションのいずれかが ON か。"""
+        return any(
+            var.get()
+            for var in (
+                self._use_ai_titles,
+                self._use_ai_reclassify,
+                self._use_ai_subhead,
+                self._use_ai_notes,
+            )
+        )
+
+    def _on_ai_options_toggle(self, *_args: object) -> None:
+        """AI オプション ON 時に LLM プリロードを開始する（Glaux 手動起動相当）。"""
+        if self._needs_llm_preload():
             self._start_llm_preload()
 
     def _start_llm_preload(self) -> None:
@@ -522,7 +558,7 @@ class SlideMakerApp:
             return
 
         cover_title = self._cover_title.get().strip()
-        use_ai = self._use_ai_titles.get()
+        use_ai = self._needs_llm_preload()
         if use_ai:
             self._start_llm_preload()
         self._set_busy(True, "JSON生成中...")
@@ -541,9 +577,12 @@ class SlideMakerApp:
                 data, llm_note = json_builder.build_from_pdf(
                     pdf,
                     cover_title=cover_title or None,
-                    use_ai_titles=use_ai,
+                    use_ai_titles=self._use_ai_titles.get(),
+                    use_ai_reclassify=self._use_ai_reclassify.get(),
+                    use_ai_subhead=self._use_ai_subhead.get(),
+                    use_ai_notes=self._use_ai_notes.get(),
                     progress_callback=progress_callback if use_ai else None,
-                    title_ready_callback=title_ready_callback if use_ai else None,
+                    title_ready_callback=title_ready_callback if self._use_ai_titles.get() else None,
                     model=model,
                 )
                 finish_status = llm_note or "JSON生成完了"

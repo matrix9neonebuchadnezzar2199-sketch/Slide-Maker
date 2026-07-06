@@ -646,6 +646,324 @@ def render_table(prs: Presentation, s: dict[str, Any]) -> None:
                     schema.set_jp_font(run, size=cell_font, color=schema.TEXT_MAIN)
 
 
+_STEP_PREFIX_RE = re.compile(r"^\s*(?:\d+[\.\):、\s]|STEP\s*\d+|第\d+)", re.IGNORECASE)
+
+
+def _strip_step_prefix(text: str) -> str:
+    """process 等で自動番号と重複する接頭辞を除去する。"""
+    cleaned = text.strip()
+    while True:
+        new = _STEP_PREFIX_RE.sub("", cleaned, count=1).strip()
+        if new == cleaned:
+            break
+        cleaned = new
+    return cleaned
+
+
+def _apply_speaker_notes(slide, notes: Any) -> None:
+    """スピーカーノートを設定する。"""
+    if not notes:
+        return
+    text = str(notes).strip()
+    if not text:
+        return
+    notes_slide = slide.notes_slide
+    notes_tf = notes_slide.notes_text_frame
+    notes_tf.text = text
+
+
+def render_process(prs: Presentation, s: dict[str, Any]) -> None:
+    """手順・工程スライド（最大4ステップ）を描画する。"""
+    slide = _add_slide(prs)
+    _draw_header(slide, s)
+
+    steps = [_strip_step_prefix(str(step)) for step in (s.get("steps") or [])[: schema.MAX_COUNT["process"]]]
+    if not steps:
+        return
+
+    n = len(steps)
+    if n <= 2:
+        box_h = Emu(750000)
+        font_size = schema.SIZE_BODY
+    elif n == 3:
+        box_h = schema.PROCESS_STEP_H
+        font_size = schema.SIZE_BODY
+    else:
+        box_h = Emu(520000)
+        font_size = schema.SIZE_BODY_SM
+
+    colors = schema.gradient_steps_for_levels(n)
+    body_bg = schema.BG_LIGHT
+    header_w = schema.PROCESS_HEADER_W
+    body_left = schema.MARGIN_X + header_w
+    body_w = schema.CONTENT_W - header_w
+    current_y = schema.BODY_Y
+
+    for i, step_text in enumerate(steps):
+        header = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, schema.MARGIN_X, current_y, header_w, box_h,
+        )
+        _fill_solid(header, colors[i])
+        _add_textbox(
+            slide, schema.MARGIN_X, current_y, header_w, box_h,
+            f"STEP {i + 1}",
+            font_size=font_size, bold=True, color=schema.TEXT_ON_FILL,
+            align=PP_ALIGN.CENTER,
+        )
+
+        body = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, body_left, current_y, body_w, box_h,
+        )
+        _fill_solid(body, body_bg)
+        _add_rich_textbox(
+            slide, body_left + Emu(80000), current_y, body_w - Emu(160000), box_h,
+            step_text, font_size=font_size,
+        )
+
+        current_y += box_h
+        if i < n - 1:
+            arrow = slide.shapes.add_shape(
+                MSO_SHAPE.DOWN_ARROW,
+                schema.MARGIN_X + header_w // 2 - Emu(80000),
+                current_y,
+                Emu(160000),
+                schema.PROCESS_ARROW_H,
+            )
+            _fill_solid(arrow, schema.ACCENT)
+            current_y += schema.PROCESS_ARROW_H
+
+
+def render_timeline(prs: Presentation, s: dict[str, Any]) -> None:
+    """時系列スライドを描画する。"""
+    slide = _add_slide(prs)
+    _draw_header(slide, s)
+
+    milestones = s.get("milestones") or []
+    if not milestones:
+        return
+
+    area_top = schema.BODY_Y
+    area_h = schema.BODY_H
+    inner = Emu(600000)
+    left_x = schema.MARGIN_X + inner
+    right_x = schema.MARGIN_X + schema.CONTENT_W - inner
+    base_y = area_top + area_h // 2
+
+    line = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE, left_x, base_y, right_x - left_x, Emu(30000),
+    )
+    _fill_solid(line, schema.BORDER)
+
+    n = len(milestones)
+    gap = (right_x - left_x) // max(n - 1, 1)
+    card_w = schema.TIMELINE_CARD_W
+    card_h = schema.TIMELINE_CARD_H
+    header_h = Emu(350000)
+    colors = schema.gradient_steps_for_levels(n)
+
+    for i, milestone in enumerate(milestones):
+        if not isinstance(milestone, dict):
+            continue
+        label = str(milestone.get("label", ""))[:30]
+        date_text = str(milestone.get("date", ""))
+        x = left_x + gap * i
+        is_above = i % 2 == 0
+        card_top = (base_y - Emu(400000) - card_h) if is_above else (base_y + Emu(400000))
+
+        dot = slide.shapes.add_shape(
+            MSO_SHAPE.OVAL, x - Emu(50000), base_y - Emu(50000), Emu(100000), Emu(100000),
+        )
+        _fill_solid(dot, colors[i % len(colors)])
+
+        card_left = x - card_w // 2
+        header_shape = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, card_left, card_top, card_w, header_h,
+        )
+        _fill_solid(header_shape, colors[i % len(colors)])
+        _add_textbox(
+            slide, card_left, card_top, card_w, header_h,
+            date_text, font_size=schema.SIZE_BODY_SM, bold=True,
+            color=schema.TEXT_ON_FILL, align=PP_ALIGN.CENTER,
+        )
+
+        body_h = card_h - header_h
+        body_shape = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, card_left, card_top + header_h, card_w, body_h,
+        )
+        _fill_solid_border(body_shape, schema.BG_WHITE)
+
+        label_len = len(label)
+        if label_len > 40:
+            label_font = Pt(10)
+        elif label_len > 30:
+            label_font = Pt(11)
+        elif label_len > 20:
+            label_font = schema.SIZE_BODY_SM
+        else:
+            label_font = schema.SIZE_BODY
+
+        _add_rich_textbox(
+            slide, card_left, card_top + header_h, card_w, body_h,
+            label, font_size=label_font,
+        )
+
+
+def render_cycle(prs: Presentation, s: dict[str, Any]) -> None:
+    """サイクル図（4項目固定）を描画する。"""
+    slide = _add_slide(prs)
+    _draw_header(slide, s)
+
+    raw_items = s.get("items") or []
+    if len(raw_items) != schema.FIXED_COUNT["cycle"]:
+        return
+
+    area_left = schema.MARGIN_X
+    area_w = schema.CONTENT_W
+    area_top = schema.BODY_Y
+    area_h = schema.BODY_H
+    center_x = area_left + area_w // 2
+    center_y = area_top + area_h // 2
+
+    center_text = s.get("centerText")
+    if center_text:
+        _add_textbox(
+            slide,
+            center_x - Emu(900000),
+            center_y - Emu(400000),
+            Emu(1800000),
+            Emu(800000),
+            str(center_text),
+            font_size=schema.SIZE_BODY,
+            bold=True,
+            color=schema.PRIMARY,
+            align=PP_ALIGN.CENTER,
+        )
+
+    radius_x = area_w // 3
+    radius_y = area_h // 2 - schema.CYCLE_CARD_H // 2
+    positions = [
+        (center_x + radius_x, center_y),
+        (center_x, center_y + radius_y),
+        (center_x - radius_x, center_y),
+        (center_x, center_y - radius_y),
+    ]
+
+    for i, (pos_x, pos_y) in enumerate(positions):
+        item = raw_items[i]
+        if isinstance(item, str):
+            sub_label = f"{i + 1}番目"
+            label = item
+        else:
+            sub_label = str(item.get("subLabel") or f"{i + 1}番目")
+            label = str(item.get("label", ""))
+
+        card_x = pos_x - schema.CYCLE_CARD_W // 2
+        card_y = pos_y - schema.CYCLE_CARD_H // 2
+        card = slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE,
+            card_x, card_y, schema.CYCLE_CARD_W, schema.CYCLE_CARD_H,
+        )
+        _fill_solid(card, schema.PRIMARY)
+        combined = f"{sub_label}\n{label}" if label else sub_label
+        _add_textbox(
+            slide, card_x, card_y, schema.CYCLE_CARD_W, schema.CYCLE_CARD_H,
+            combined, font_size=schema.SIZE_BODY_SM, bold=True,
+            color=schema.TEXT_ON_FILL, align=PP_ALIGN.CENTER,
+        )
+
+
+def render_pyramid(prs: Presentation, s: dict[str, Any]) -> None:
+    """ピラミッド図（3〜4段）を描画する。"""
+    slide = _add_slide(prs)
+    _draw_header(slide, s)
+
+    levels = (s.get("levels") or [])[: schema.MAX_COUNT["pyramid_levels_max"]]
+    if len(levels) < schema.MAX_COUNT["pyramid_levels_min"]:
+        return
+
+    colors = schema.gradient_steps_for_levels(len(levels))
+    pyramid_w = int(schema.CONTENT_W * 55 // 100)
+    text_w = schema.CONTENT_W - pyramid_w - schema.CARD_GAP
+    text_left = schema.MARGIN_X + pyramid_w + schema.CARD_GAP
+    level_h = schema.PYRAMID_LEVEL_H
+    gap = Emu(30000)
+    total_h = len(levels) * level_h + (len(levels) - 1) * gap
+    start_y = schema.BODY_Y + max(0, (schema.BODY_H - total_h) // 2)
+    base_w = pyramid_w
+    width_step = base_w // max(len(levels), 1)
+    center_x = schema.MARGIN_X + pyramid_w // 2
+
+    for index, level in enumerate(levels):
+        if not isinstance(level, dict):
+            continue
+        level_w = base_w - width_step * (len(levels) - 1 - index)
+        level_x = center_x - level_w // 2
+        level_y = start_y + index * (level_h + gap)
+
+        box = slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE, level_x, level_y, level_w, level_h,
+        )
+        _fill_solid(box, colors[index])
+        title = str(level.get("title", f"レベル{index + 1}"))
+        _add_textbox(
+            slide, level_x, level_y, level_w, level_h,
+            title, font_size=schema.SIZE_BODY, bold=True,
+            color=schema.TEXT_ON_FILL, align=PP_ALIGN.CENTER,
+        )
+
+        desc = str(level.get("description", ""))
+        if desc:
+            _add_rich_textbox(
+                slide, text_left, level_y, text_w, level_h,
+                desc, font_size=schema.SIZE_BODY_SM,
+            )
+
+
+def render_triangle(prs: Presentation, s: dict[str, Any]) -> None:
+    """トライアングル図（3項目固定）を描画する。"""
+    slide = _add_slide(prs)
+    _draw_header(slide, s)
+
+    raw_items = (s.get("items") or [])[: schema.FIXED_COUNT["triangle"]]
+    if len(raw_items) != schema.FIXED_COUNT["triangle"]:
+        return
+
+    area_top = schema.BODY_Y
+    area_h = schema.BODY_H
+    area_left = schema.MARGIN_X
+    area_w = schema.CONTENT_W
+    card_w = schema.TRIANGLE_CARD_W
+    card_h = schema.TRIANGLE_CARD_H
+
+    positions = [
+        (area_left + area_w // 2, area_top + Emu(80000) + card_h // 2),
+        (area_left + area_w - Emu(80000) - card_w // 2, area_top + area_h - card_h // 2),
+        (area_left + Emu(80000) + card_w // 2, area_top + area_h - card_h // 2),
+    ]
+
+    for i, (pos_x, pos_y) in enumerate(positions):
+        item = raw_items[i]
+        if isinstance(item, str):
+            title, desc = item, ""
+        else:
+            title = str(item.get("title", ""))
+            desc = str(item.get("desc", ""))
+
+        card_x = pos_x - card_w // 2
+        card_y = pos_y - card_h // 2
+        card = slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE, card_x, card_y, card_w, card_h,
+        )
+        _fill_solid(card, schema.PRIMARY)
+        text = title if not desc else f"{title}\n{desc}"
+        font_size = schema.SIZE_BODY_SM if len(text) > 35 else schema.SIZE_BODY
+        _add_textbox(
+            slide, card_x, card_y, card_w, card_h,
+            text, font_size=font_size, bold=True,
+            color=schema.TEXT_ON_FILL, align=PP_ALIGN.CENTER,
+        )
+
+
 RENDERERS = {
     "title": render_title,
     "section": render_section,
@@ -656,6 +974,11 @@ RENDERERS = {
     "barCompare": render_barCompare,
     "compare": render_compare,
     "table": render_table,
+    "process": render_process,
+    "timeline": render_timeline,
+    "cycle": render_cycle,
+    "pyramid": render_pyramid,
+    "triangle": render_triangle,
 }
 
 
@@ -694,6 +1017,8 @@ def build_pptx(slide_data: list[dict[str, Any]], out_path: str, template: str | 
         )
         try:
             renderer_fn(prs, s)
+            if prs.slides:
+                _apply_speaker_notes(prs.slides[-1], s.get("notes"))
         except Exception as exc:
             logger.warning("skip slide=%d type=%s err=%s", index, slide_type, exc)
 

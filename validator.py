@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import schema
+import slide_normalize
 
 _LEADING_NUMBER_RE = re.compile(schema.LEADING_NUMBER_PATTERN, re.IGNORECASE)
 
@@ -31,12 +32,13 @@ def validate_json_text(
     except json.JSONDecodeError as exc:
         return None, [f"JSON 構文エラー: {exc.msg} (行 {exc.lineno}, 列 {exc.colno})"], []
 
-    errors = validate_slide_data(parsed)
+    normalized, norm_warnings = slide_normalize.normalize_slide_data(parsed)
+    errors = validate_slide_data(normalized)
     if errors:
-        return None, errors, []
+        return None, errors, norm_warnings
 
-    warnings = collect_warnings(parsed)
-    return parsed, [], warnings
+    warnings = collect_warnings(normalized) + norm_warnings
+    return normalized, [], warnings
 
 
 def validate_slide_data(data: Any, *, strict_types: bool = True) -> list[str]:
@@ -224,6 +226,64 @@ def _validate_type_specific(slide: dict[str, Any], prefix: str, slide_type: str)
         steps = slide.get("steps")
         if isinstance(steps, list) and len(steps) > schema.MAX_COUNT["process"]:
             errors.append(f"{prefix}: `process` の `steps` は最大 {schema.MAX_COUNT['process']} 件です。")
+        if isinstance(steps, list) and len(steps) == 0:
+            errors.append(f"{prefix}: `process` の `steps` は 1 件以上必要です。")
+
+    if slide_type == "pyramid":
+        levels = slide.get("levels")
+        if isinstance(levels, list):
+            if len(levels) < schema.MAX_COUNT["pyramid_levels_min"]:
+                errors.append(
+                    f"{prefix}: `pyramid` の `levels` は最低 "
+                    f"{schema.MAX_COUNT['pyramid_levels_min']} 段必要です。"
+                )
+            if len(levels) > schema.MAX_COUNT["pyramid_levels_max"]:
+                errors.append(
+                    f"{prefix}: `pyramid` の `levels` は最大 "
+                    f"{schema.MAX_COUNT['pyramid_levels_max']} 段です。"
+                )
+            for li, level in enumerate(levels, start=1):
+                if not isinstance(level, dict):
+                    errors.append(f"{prefix}: `levels[{li - 1}]` はオブジェクトである必要があります。")
+                    continue
+                for key in ("title", "description"):
+                    if key not in level:
+                        errors.append(f"{prefix}: `levels[{li - 1}]` に `{key}` が必須です。")
+
+    if slide_type == "timeline":
+        milestones = slide.get("milestones")
+        if isinstance(milestones, list):
+            if len(milestones) == 0:
+                errors.append(f"{prefix}: `timeline` の `milestones` は 1 件以上必要です。")
+            for mi, milestone in enumerate(milestones, start=1):
+                if not isinstance(milestone, dict):
+                    errors.append(f"{prefix}: `milestones[{mi - 1}]` はオブジェクトである必要があります。")
+                    continue
+                for key in ("label", "date"):
+                    if key not in milestone:
+                        errors.append(f"{prefix}: `milestones[{mi - 1}]` に `{key}` が必須です。")
+
+    if slide_type == "triangle":
+        items = slide.get("items")
+        if isinstance(items, list):
+            for ti, item in enumerate(items, start=1):
+                if isinstance(item, str):
+                    continue
+                if not isinstance(item, dict) or "title" not in item:
+                    errors.append(
+                        f"{prefix}: `items[{ti - 1}]` は文字列または title を持つオブジェクトである必要があります。"
+                    )
+
+    if slide_type == "cycle":
+        items = slide.get("items")
+        if isinstance(items, list):
+            for ci, item in enumerate(items, start=1):
+                if isinstance(item, str):
+                    continue
+                if not isinstance(item, dict) or "label" not in item:
+                    errors.append(
+                        f"{prefix}: `items[{ci - 1}]` は文字列または label を持つオブジェクトである必要があります。"
+                    )
 
     if slide_type == "title":
         date_val = slide.get("date", "")
@@ -291,6 +351,34 @@ def _collect_bullet_texts(slide: dict[str, Any], slide_type: str) -> list[tuple[
     if slide_type == "process":
         for i, step in enumerate(slide.get("steps") or []):
             result.append((f"steps[{i}]", step))
+
+    if slide_type == "timeline":
+        for i, milestone in enumerate(slide.get("milestones") or []):
+            if isinstance(milestone, dict):
+                result.append((f"milestones[{i}].label", milestone.get("label", "")))
+
+    if slide_type == "triangle":
+        for i, item in enumerate(slide.get("items") or []):
+            if isinstance(item, str):
+                result.append((f"items[{i}]", item))
+            elif isinstance(item, dict):
+                if item.get("title"):
+                    result.append((f"items[{i}].title", item["title"]))
+                if item.get("desc"):
+                    result.append((f"items[{i}].desc", item["desc"]))
+
+    if slide_type == "cycle":
+        for i, item in enumerate(slide.get("items") or []):
+            if isinstance(item, str):
+                result.append((f"items[{i}]", item))
+            elif isinstance(item, dict) and item.get("label"):
+                result.append((f"items[{i}].label", item["label"]))
+
+    if slide_type == "pyramid":
+        for i, level in enumerate(slide.get("levels") or []):
+            if isinstance(level, dict):
+                if level.get("description"):
+                    result.append((f"levels[{i}].description", level["description"]))
 
     return result
 

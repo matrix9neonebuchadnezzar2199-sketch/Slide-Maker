@@ -120,6 +120,18 @@ TABLE_WARN_CELLS = 80
 TABLE_DENSE_COLS = 8
 COMPARE_MAX_ITEMS = 6
 
+# 第3弾レイアウト
+PROCESS_HEADER_W = Emu(900000)
+PROCESS_STEP_H = Emu(650000)
+PROCESS_ARROW_H = Emu(120000)
+TIMELINE_CARD_W = Emu(1800000)
+TIMELINE_CARD_H = Emu(1100000)
+PYRAMID_LEVEL_H = Emu(650000)
+TRIANGLE_CARD_W = Emu(2400000)
+TRIANGLE_CARD_H = Emu(1100000)
+CYCLE_CARD_W = Emu(2000000)
+CYCLE_CARD_H = Emu(900000)
+
 
 def set_jp_font(
     run,
@@ -174,8 +186,21 @@ PHASE1_TYPES = frozenset({"title", "section", "content", "agenda", "closing"})
 
 PHASE2_TYPES = frozenset({"kpi", "barCompare", "compare", "table"})
 
-# 現時点で validator / UI が許可する type（第1+2弾）
-IMPLEMENTED_TYPES = PHASE1_TYPES | PHASE2_TYPES
+PHASE3_TYPES = frozenset({"pyramid", "triangle", "timeline", "process", "cycle"})
+
+# validator / UI / renderer が許可する type（第1+2+3弾）
+IMPLEMENTED_TYPES = PHASE1_TYPES | PHASE2_TYPES | PHASE3_TYPES
+
+# 魔人式 system prompt で定義されるが Slide-Maker 未描画の type（貼り付け時 content 降格）
+MAJIN_EXTRA_TYPES = frozenset({
+    "processList", "diagram", "cards", "headerCards", "progress",
+    "quote", "bulletCards", "faq", "statsCompare", "flowChart",
+    "stepUp", "imageText",
+})
+
+MAJIN_ALL_TYPES = IMPLEMENTED_TYPES | MAJIN_EXTRA_TYPES
+
+MAJIN_DOWNGRADE_TYPES = MAJIN_EXTRA_TYPES
 
 ALL_TYPES = PHASE1_TYPES | frozenset({
     "kpi", "barCompare", "compare", "table",
@@ -225,6 +250,12 @@ LLM_MAX_TOKENS = 32
 LLM_TEMPERATURE = 0.1
 LLM_TITLE_CONTEXT_POINTS = 2
 LLM_TITLE_CONTEXT_MAX_CHARS = 200
+
+# LLM subhead / notes / 再分類（マイクロコール）
+LLM_SUBHEAD_MAX_CHARS = 50
+LLM_SUBHEAD_MAX_TOKENS = 64
+LLM_NOTES_MAX_TOKENS = 128
+LLM_RECLASSIFY_MAX_TOKENS = 8
 
 # LLM モデル・低メモリロード（Glaux glaux-low-memory-llama-server 準拠）
 LLM_DEFAULT_MODEL_NAME = "gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf"
